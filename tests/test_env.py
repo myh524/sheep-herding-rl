@@ -64,7 +64,7 @@ def test_sheep_flock_env():
         episode_length=50,
     )
     
-    assert env.observation_space.shape == (12,)
+    assert env.observation_space.shape == (10,)
     assert env.action_space.shape == (4,)
     
     obs = env.reset()

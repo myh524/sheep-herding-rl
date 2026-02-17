@@ -21,6 +21,11 @@ class TrainingLog:
     train_loss: List[float] = None
     stage: List[int] = None
     success_rate: List[float] = None
+    learning_rate: List[float] = None
+    grad_norm: List[float] = None
+    entropy: List[float] = None
+    value_loss: List[float] = None
+    policy_loss: List[float] = None
     
     def __post_init__(self):
         if self.episode is None:
@@ -35,6 +40,16 @@ class TrainingLog:
             self.stage = []
         if self.success_rate is None:
             self.success_rate = []
+        if self.learning_rate is None:
+            self.learning_rate = []
+        if self.grad_norm is None:
+            self.grad_norm = []
+        if self.entropy is None:
+            self.entropy = []
+        if self.value_loss is None:
+            self.value_loss = []
+        if self.policy_loss is None:
+            self.policy_loss = []
 
 
 def parse_args():
@@ -91,6 +106,16 @@ def parse_log_file(log_path: str) -> TrainingLog:
             if 'success_rate' in metrics:
                 rate_str = metrics['success_rate'].rstrip('%')
                 log.success_rate.append(float(rate_str) / 100.0)
+            if 'learning_rate' in metrics:
+                log.learning_rate.append(float(metrics['learning_rate']))
+            if 'grad_norm' in metrics:
+                log.grad_norm.append(float(metrics['grad_norm']))
+            if 'entropy' in metrics:
+                log.entropy.append(float(metrics['entropy']))
+            if 'value_loss' in metrics:
+                log.value_loss.append(float(metrics['value_loss']))
+            if 'policy_loss' in metrics:
+                log.policy_loss.append(float(metrics['policy_loss']))
     
     return log
 
@@ -113,14 +138,14 @@ def smooth_data(data: List[float], window: int) -> np.ndarray:
 def plot_single_run(log: TrainingLog, args: argparse.Namespace, 
                     title: str = "训练曲线"):
     """绘制单个训练run的曲线"""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 15))
     fig.suptitle(title, fontsize=16, fontweight='bold')
     
     if len(log.episode) == 0:
         print("警告: 没有有效的训练数据")
         return fig
     
-    ax1, ax2, ax3, ax4 = axes.flatten()
+    ax1, ax2, ax3, ax4, ax5, ax6 = axes.flatten()
     
     if log.avg_reward:
         rewards = smooth_data(log.avg_reward, args.smooth) if args.smooth else np.array(log.avg_reward)
@@ -160,16 +185,39 @@ def plot_single_run(log: TrainingLog, args: argparse.Namespace,
         ax4.set_title('课程学习进度')
         ax4.grid(True, alpha=0.3)
     
+    if log.learning_rate:
+        lr = smooth_data(log.learning_rate, args.smooth) if args.smooth else np.array(log.learning_rate)
+        ax5.plot(log.episode[:len(log.learning_rate)], log.learning_rate, alpha=0.3, color='orange', label='原始')
+        if args.smooth:
+            ax5.plot(log.episode[:len(log.learning_rate)], lr, color='orange', linewidth=2, label=f'平滑(w={args.smooth})')
+        ax5.set_xlabel('Episode')
+        ax5.set_ylabel('学习率')
+        ax5.set_title('学习率曲线')
+        ax5.set_yscale('log')
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+    
+    if log.grad_norm:
+        grad = smooth_data(log.grad_norm, args.smooth) if args.smooth else np.array(log.grad_norm)
+        ax6.plot(log.episode[:len(log.grad_norm)], log.grad_norm, alpha=0.3, color='brown', label='原始')
+        if args.smooth:
+            ax6.plot(log.episode[:len(log.grad_norm)], grad, color='brown', linewidth=2, label=f'平滑(w={args.smooth})')
+        ax6.set_xlabel('Episode')
+        ax6.set_ylabel('梯度范数')
+        ax6.set_title('梯度范数曲线')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     return fig
 
 
 def plot_comparison(logs: List[Tuple[str, TrainingLog]], args: argparse.Namespace):
     """绘制多个训练run的对比图"""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 15))
     fig.suptitle('训练对比', fontsize=16, fontweight='bold')
     
-    ax1, ax2, ax3, ax4 = axes.flatten()
+    ax1, ax2, ax3, ax4, ax5, ax6 = axes.flatten()
     colors = plt.cm.tab10(np.linspace(0, 1, len(logs)))
     
     for (name, log), color in zip(logs, colors):
@@ -213,6 +261,25 @@ def plot_comparison(logs: List[Tuple[str, TrainingLog]], args: argparse.Namespac
         ax4.set_title('课程学习进度')
         ax4.legend()
         ax4.grid(True, alpha=0.3)
+        
+        if log.learning_rate:
+            lr = smooth_data(log.learning_rate, args.smooth) if args.smooth else np.array(log.learning_rate)
+            ax5.plot(log.episode[:len(log.learning_rate)], lr, color=color, linewidth=2, label=label)
+        ax5.set_xlabel('Episode')
+        ax5.set_ylabel('学习率')
+        ax5.set_title('学习率对比')
+        ax5.set_yscale('log')
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+        
+        if log.grad_norm:
+            grad = smooth_data(log.grad_norm, args.smooth) if args.smooth else np.array(log.grad_norm)
+            ax6.plot(log.episode[:len(log.grad_norm)], grad, color=color, linewidth=2, label=label)
+        ax6.set_xlabel('Episode')
+        ax6.set_ylabel('梯度范数')
+        ax6.set_title('梯度范数对比')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
     
     plt.tight_layout()
     return fig

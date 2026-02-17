@@ -316,7 +316,8 @@ class ImprovedActorCritic(nn.Module):
 
     def _get_action_dist(self, actor_features: torch.Tensor) -> torch.distributions.Normal:
         action_mean = self.action_mean(actor_features)
-        action_std = self.action_log_std.exp().expand_as(action_mean)
+        action_log_std = torch.clamp(self.action_log_std, min=-5.0, max=2.0)
+        action_std = action_log_std.exp().expand_as(action_mean)
         return torch.distributions.Normal(action_mean, action_std)
 
     def _to_action_space(self, x: torch.Tensor) -> torch.Tensor:
@@ -357,8 +358,11 @@ class ImprovedActorCritic(nn.Module):
         actions = self._to_action_space(tanh_actions)
 
         log_prob = action_dist.log_prob(z).sum(-1, keepdim=True)
-        log_det_jacobian = torch.log(1 - tanh_actions.pow(2) + 1e-6).sum(-1, keepdim=True)
+        log_det_jacobian = torch.log(torch.clamp(1 - tanh_actions.pow(2), min=1e-4)).sum(-1, keepdim=True)
         action_log_probs = log_prob - log_det_jacobian
+        
+        if torch.isnan(action_log_probs).any():
+            action_log_probs = torch.where(torch.isnan(action_log_probs), torch.zeros_like(action_log_probs), action_log_probs)
 
         return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
 
@@ -399,12 +403,18 @@ class ImprovedActorCritic(nn.Module):
         action_dist = self._get_action_dist(actor_features)
 
         tanh_actions = self._from_action_space(action)
-        tanh_actions = tanh_actions.clamp(-1 + 1e-6, 1 - 1e-6)
+        tanh_actions = tanh_actions.clamp(-1 + 1e-4, 1 - 1e-4)
         z = 0.5 * torch.log((1 + tanh_actions) / (1 - tanh_actions))
+        
+        if torch.isnan(z).any():
+            z = torch.where(torch.isnan(z), torch.zeros_like(z), z)
 
         log_prob = action_dist.log_prob(z).sum(-1, keepdim=True)
-        log_det_jacobian = torch.log(1 - tanh_actions.pow(2) + 1e-6).sum(-1, keepdim=True)
+        log_det_jacobian = torch.log(torch.clamp(1 - tanh_actions.pow(2), min=1e-4)).sum(-1, keepdim=True)
         action_log_probs = log_prob - log_det_jacobian
+        
+        if torch.isnan(action_log_probs).any():
+            action_log_probs = torch.where(torch.isnan(action_log_probs), torch.zeros_like(action_log_probs), action_log_probs)
 
         dist_entropy = action_dist.entropy().sum(-1)
         if active_masks is not None:

@@ -103,6 +103,12 @@ class PPOReplayBuffer:
         active_masks: np.ndarray = None,
         available_actions: np.ndarray = None,
     ) -> None:
+        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
+        actions = np.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0)
+        rewards = np.nan_to_num(rewards, nan=0.0, posinf=10.0, neginf=-10.0)
+        value_preds = np.nan_to_num(value_preds, nan=0.0, posinf=100.0, neginf=-100.0)
+        action_log_probs = np.nan_to_num(action_log_probs, nan=0.0, posinf=0.0, neginf=-10.0)
+        
         self.obs[self.step + 1] = obs.copy()
         self.rnn_states[self.step + 1] = rnn_states_actor.copy()
         self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
@@ -132,6 +138,8 @@ class PPOReplayBuffer:
             self.available_actions[0] = self.available_actions[-1].copy()
 
     def compute_returns(self, next_value: np.ndarray, value_normalizer=None):
+        next_value = np.nan_to_num(next_value, nan=0.0, posinf=100.0, neginf=-100.0)
+        
         if self._use_gae:
             self.value_preds[-1] = next_value
             gae = 0
@@ -154,6 +162,7 @@ class PPOReplayBuffer:
                     )
                     gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
                     self.returns[step] = gae + self.value_preds[step]
+                self.returns[step] = np.nan_to_num(self.returns[step], nan=0.0, posinf=100.0, neginf=-100.0)
         else:
             self.returns[-1] = next_value
             for step in reversed(range(self.rewards.shape[0])):
@@ -161,6 +170,7 @@ class PPOReplayBuffer:
                     self.returns[step + 1] * self.gamma * self.masks[step + 1]
                     + self.rewards[step]
                 )
+                self.returns[step] = np.nan_to_num(self.returns[step], nan=0.0, posinf=100.0, neginf=-100.0)
 
     def feed_forward_generator(
         self,

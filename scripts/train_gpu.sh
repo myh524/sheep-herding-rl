@@ -10,9 +10,9 @@
 #   - Improved hyperparameters
 # ============================================================================
 # Curriculum Learning Stages (auto-managed):
-#   Stage 0: 3 sheep, 2 herders, 30x30 world
-#   Stage 1: 5 sheep, 2 herders, 40x40 world
-#   Stage 2: 6 sheep, 3 herders, 30x30 world (target)
+#   Stage 0: 3 sheep, 3 herders, 60x60 world
+#   Stage 1: 5 sheep, 3 herders, 60x60 world
+#   Stage 2: 10 sheep, 3 herders, 60x60 world (target)
 # ============================================================================
 
 python train_ppo.py \
@@ -28,7 +28,7 @@ python train_ppo.py \
     --num_mini_batch 4 \
     --clip_param 0.2 \
     --value_loss_coef 0.5 \
-    --entropy_coef 0.01 \
+    --entropy_coef 0.05 \
     --gamma 0.99 \
     --gae_lambda 0.95 \
     --max_grad_norm 0.5 \

@@ -1,6 +1,33 @@
 """
 High-Level Action Decoder for Sheep Herding
 Decodes normalized actions [-1, 1] to formation parameters
+
+Design Philosophy:
+==================
+Based on real sheep herding physics and practical engineering considerations:
+
+1. INTUITIVE PARAMETERS:
+   - wedge_center: Where to position the formation (relative to target direction)
+   - wedge_width: How spread out the herders are (0=concentrated, 1=360° surround)
+   - radius: Distance from flock center
+   - asymmetry: Offset for flank maneuvers (-1=left flank, 0=center, 1=right flank)
+
+2. DETERMINISTIC MAPPING:
+   Same action → Same target positions (no random sampling)
+   This prevents target "flickering" and stabilizes policy learning.
+
+3. PHYSICAL INTUITION:
+   - wedge_width=0: All herders at same angle (push mode)
+   - wedge_width=1: Herders spread 360° (surround mode)
+   - asymmetry>0: Right flank emphasis (steer flock left)
+   - asymmetry<0: Left flank emphasis (steer flock right)
+
+Action Space (4D):
+==================
+[0] wedge_center: [-1, 1] → angle offset from target direction [-π, π]
+[1] wedge_width:  [-1, 1] → spread factor [0, 1] (0=push, 1=surround)
+[2] radius:       [-1, 1] → distance from flock [R_min, R_max]
+[3] asymmetry:    [-1, 1] → flank offset [-wedge_width/2, +wedge_width/2]
 """
 
 import numpy as np
@@ -9,36 +36,24 @@ from typing import Dict, Any, Optional
 
 class HighLevelAction:
     """
-    High-level action decoder
+    High-level action decoder with intuitive sheep herding semantics
     
-    Decodes neural network output (normalized actions [-1, 1]) to actual station parameters:
-    - mu_r: station radius mean
-    - sigma_r: station radius std
-    - mu_theta: relative angle (relative to target direction)
-    - kappa: von Mises concentration parameter
-    
-    Kappa semantics:
-    - kappa = 0: uniform distribution, herders evenly spread around flock (360° surround)
-    - kappa > 0: concentrated around mu_theta direction
-    - kappa -> infinity: all herders at same angle (overlap at mu_theta)
-    
-    This design allows the policy to:
-    1. Use kappa=0 for surrounding/containing the flock
-    2. Use kappa>0 for concentrated pushing in one direction
+    Action Space (4D continuous, each in [-1, 1]):
+    - wedge_center: Formation center angle (relative to target direction)
+    - wedge_width: Formation spread (0=concentrated push, 1=360° surround)
+    - radius: Distance from flock center
+    - asymmetry: Flank offset for directional steering
     """
     
     def __init__(
         self,
         R_ref: float = 8.0,
-        R_min: float = 1.0,
-        R_max: float = 25.0,
+        R_min: float = 3.0,
+        R_max: float = 20.0,
     ):
         self.R_ref = R_ref
         self.R_min = R_min
         self.R_max = R_max
-        
-        self.log_kappa_min = np.log(0.01)
-        self.log_kappa_max = np.log(20.0)
     
     def decode_action(
         self,
@@ -46,70 +61,71 @@ class HighLevelAction:
         target_direction: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Decode raw action with constraints
+        Decode raw action to formation parameters
         
         Args:
             raw_action: raw action array, range [-1, 1], shape (4,)
-                - [0]: normalized radius mean
-                - [1]: normalized radius std
-                - [2]: normalized relative angle (relative to target direction)
-                - [3]: normalized log_kappa
+                - [0]: wedge_center (formation center angle offset)
+                - [1]: wedge_width (formation spread factor)
+                - [2]: radius (distance from flock)
+                - [3]: asymmetry (flank offset)
             target_direction: target direction angle (radians)
         
         Returns:
-            Decoded action dictionary
+            Decoded action dictionary with physical parameters
         """
         raw_action = np.clip(raw_action, -1.0, 1.0)
         
-        mu_r = (raw_action[0] + 1) * self.R_ref
-        mu_r = np.clip(mu_r, self.R_ref * 0.5, self.R_ref * 2)
-        
-        sigma_r = (raw_action[1] + 1) * self.R_ref * 0.25
-        sigma_r = np.clip(sigma_r, 0.0, self.R_ref * 0.5)
-        
-        mu_theta_rel = raw_action[2] * np.pi
-        
+        wedge_center_offset = raw_action[0] * np.pi
         if target_direction is not None:
-            mu_theta = target_direction + mu_theta_rel
-            mu_theta = np.arctan2(np.sin(mu_theta), np.cos(mu_theta))
+            wedge_center = target_direction + wedge_center_offset
+            wedge_center = np.arctan2(np.sin(wedge_center), np.cos(wedge_center))
         else:
-            mu_theta = mu_theta_rel
+            wedge_center = wedge_center_offset
         
-        log_kappa = raw_action[3] * 4
-        log_kappa = np.clip(log_kappa, self.log_kappa_min, self.log_kappa_max)
-        kappa = np.exp(log_kappa)
+        wedge_width = (raw_action[1] + 1) / 2
+        
+        radius = self.R_min + (raw_action[2] + 1) / 2 * (self.R_max - self.R_min)
+        radius = np.clip(radius, self.R_min, self.R_max)
+        
+        asymmetry = raw_action[3] * 0.5
         
         return {
-            'mu_r': float(mu_r),
-            'sigma_r': float(sigma_r),
-            'mu_theta': float(mu_theta),
-            'mu_theta_rel': float(mu_theta_rel),
-            'kappa': float(kappa),
+            'wedge_center': float(wedge_center),
+            'wedge_center_offset': float(wedge_center_offset),
+            'wedge_width': float(wedge_width),
+            'radius': float(radius),
+            'asymmetry': float(asymmetry),
         }
     
     def sample_herder_positions(
         self,
         num_herders: int,
-        mu_r: float,
-        sigma_r: float,
-        mu_theta: float,
-        kappa: float
+        wedge_center: float,
+        wedge_width: float,
+        radius: float,
+        asymmetry: float,
+        **kwargs
     ) -> tuple:
         """
-        Sample herder positions (angles and radii)
+        Compute herder positions deterministically
         
-        Kappa semantics:
-        - kappa ≈ 0: uniform distribution (herders spread 360° around flock)
-        - kappa ≈ 1-5: moderately concentrated around mu_theta
-        - kappa ≈ 10-20: highly concentrated around mu_theta
-        - kappa -> infinity: all herders at mu_theta (overlap)
+        Formation Logic:
+        1. wedge_width controls total spread:
+           - 0.0: All herders at wedge_center (push mode)
+           - 1.0: Herders spread 360° around flock (surround mode)
+        
+        2. asymmetry controls flank emphasis:
+           - 0.0: Symmetric distribution around wedge_center
+           - >0: Shift formation to right side (steer flock left)
+           - <0: Shift formation to left side (steer flock right)
         
         Args:
             num_herders: number of herders
-            mu_r: radius mean
-            sigma_r: radius std
-            mu_theta: angle mean (concentration center)
-            kappa: concentration parameter
+            wedge_center: formation center angle (radians)
+            wedge_width: spread factor [0, 1]
+            radius: distance from flock center
+            asymmetry: flank offset [-0.5, 0.5]
         
         Returns:
             (angles, radii): tuple of angle and radius arrays
@@ -117,48 +133,105 @@ class HighLevelAction:
         angles = np.zeros(num_herders, dtype=np.float32)
         radii = np.zeros(num_herders, dtype=np.float32)
         
-        for i in range(num_herders):
-            if kappa < 0.1:
-                angles[i] = np.random.uniform(-np.pi, np.pi)
-            else:
-                angles[i] = np.random.vonmises(mu_theta, kappa)
-            
-            effective_sigma = sigma_r
-            if kappa > 1.0:
-                effective_sigma = sigma_r * (1.0 + 0.5 * min(kappa / 10.0, 1.0))
-            
-            radii[i] = np.clip(
-                np.random.normal(mu_r, effective_sigma),
-                self.R_min,
-                self.R_max
-            )
+        total_spread = wedge_width * np.pi
+        
+        center_offset = asymmetry * total_spread
+        formation_center = wedge_center + center_offset
+        formation_center = np.arctan2(np.sin(formation_center), np.cos(formation_center))
+        
+        if num_herders == 1:
+            angles[0] = formation_center
+            radii[0] = radius
+        else:
+            for i in range(num_herders):
+                fraction = i / (num_herders - 1)
+                
+                angle_offset = (fraction - 0.5) * total_spread
+                angles[i] = formation_center + angle_offset
+                angles[i] = np.arctan2(np.sin(angles[i]), np.cos(angles[i]))
+                
+                edge_factor = abs(fraction - 0.5) * 2
+                radii[i] = radius * (1.0 + edge_factor * 0.1)
+                radii[i] = np.clip(radii[i], self.R_min, self.R_max)
         
         return angles, radii
+    
+    def get_formation_mode(self, wedge_width: float) -> str:
+        """
+        Get human-readable formation mode name
+        
+        Args:
+            wedge_width: spread factor [0, 1]
+        
+        Returns:
+            Formation mode string
+        """
+        if wedge_width < 0.2:
+            return "PUSH"
+        elif wedge_width < 0.5:
+            return "NARROW"
+        elif wedge_width < 0.8:
+            return "WIDE"
+        else:
+            return "SURROUND"
+
+
+class FormationAnalyzer:
+    """
+    Analyze and visualize formation parameters for debugging
+    """
+    
+    @staticmethod
+    def describe_formation(decoded_action: Dict[str, Any], num_herders: int) -> str:
+        """
+        Generate human-readable description of the formation
+        
+        Args:
+            decoded_action: Decoded action dictionary
+            num_herders: number of herders
+        
+        Returns:
+            Description string
+        """
+        wedge_width = decoded_action['wedge_width']
+        asymmetry = decoded_action['asymmetry']
+        radius = decoded_action['radius']
+        
+        mode = HighLevelAction().get_formation_mode(wedge_width)
+        
+        spread_deg = wedge_width * 180
+        
+        if abs(asymmetry) < 0.1:
+            flank = "centered"
+        elif asymmetry > 0:
+            flank = f"right flank (+{asymmetry*100:.0f}%)"
+        else:
+            flank = f"left flank ({asymmetry*100:.0f}%)"
+        
+        return (
+            f"Formation: {mode} mode\n"
+            f"  - Spread: {spread_deg:.0f}°\n"
+            f"  - Radius: {radius:.1f} units\n"
+            f"  - Flank: {flank}\n"
+            f"  - Herders: {num_herders}"
+        )
 
 
 class KappaScheduler:
     """
-    Kappa parameter scheduler for training stability
+    Legacy compatibility - now controls wedge_width warmup
     """
     
     def __init__(
         self,
         warmup_epochs: int = 100,
-        kappa_init: float = 1.0,
-        kappa_min: float = 0.01,
-        kappa_max: float = 20.0,
+        kappa_init: float = 0.5,
+        **kwargs
     ):
         self.warmup_epochs = warmup_epochs
-        self.kappa_init = kappa_init
-        self.kappa_min = kappa_min
-        self.kappa_max = kappa_max
-        
-        self.log_kappa_min = np.log(kappa_min)
-        self.log_kappa_max = np.log(kappa_max)
+        self.wedge_width_init = kappa_init
     
-    def get_kappa(self, raw_log_kappa: float, epoch: int) -> float:
+    def get_wedge_width(self, raw_width: float, epoch: int) -> float:
         if epoch < self.warmup_epochs:
-            return self.kappa_init
-        
-        log_kappa = np.clip(raw_log_kappa, self.log_kappa_min, self.log_kappa_max)
-        return float(np.exp(log_kappa))
+            return self.wedge_width_init
+        return (raw_width + 1) / 2

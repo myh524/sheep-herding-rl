@@ -4,9 +4,10 @@
 # ============================================================================
 # Features:
 #   - Reduced training steps (500K)
-#   - Improved hyperparameters
+#   - Improved hyperparameters with warmup
 #   - Smaller network for faster training
 #   - Curriculum learning recommended
+#   - Enhanced numerical stability
 # ============================================================================
 
 python train_ppo.py \
@@ -19,9 +20,13 @@ python train_ppo.py \
     --seed 1 \
     --num_env_steps 500000 \
     --lr 3e-4 \
+    --lr_warmup_steps 1000 \
+    --lr_min 1e-5 \
     --ppo_epoch 10 \
     --num_mini_batch 4 \
     --clip_param 0.2 \
+    --clip_param_final 0.1 \
+    --use_clip_annealing \
     --value_loss_coef 0.5 \
     --entropy_coef 0.01 \
     --gamma 0.99 \

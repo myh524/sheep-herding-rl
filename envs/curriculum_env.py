@@ -8,6 +8,7 @@ from typing import Tuple, Dict, Any, Optional, List
 from gym import spaces
 
 from envs.sheep_flock import SheepFlockEnv
+from envs.high_level_action import HighLevelAction
 
 
 class CurriculumStage:
@@ -54,31 +55,31 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
     
     DEFAULT_STAGES = [
         CurriculumStage(
-            name='Stage 1: Simple',
+            name='Stage 0: Simple',
             num_sheep=3,
-            num_herders=2,
-            world_size=(30.0, 30.0),
-            episode_length=50,
+            num_herders=3,
+            world_size=(60.0, 60.0),
+            episode_length=80,
             target_success_rate=0.8,
+            min_episodes=50,
+        ),
+        CurriculumStage(
+            name='Stage 1: Medium',
+            num_sheep=5,
+            num_herders=3,
+            world_size=(60.0, 60.0),
+            episode_length=100,
+            target_success_rate=0.7,
             min_episodes=100,
         ),
         CurriculumStage(
-            name='Stage 2: Medium',
-            num_sheep=5,
-            num_herders=2,
-            world_size=(40.0, 40.0),
-            episode_length=75,
-            target_success_rate=0.7,
-            min_episodes=200,
-        ),
-        CurriculumStage(
-            name='Stage 3: Target',
-            num_sheep=6,
+            name='Stage 2: Target',
+            num_sheep=10,
             num_herders=3,
-            world_size=(30.0, 30.0),
-            episode_length=100,
+            world_size=(60.0, 60.0),
+            episode_length=150,
             target_success_rate=0.6,
-            min_episodes=500,
+            min_episodes=200,
         ),
     ]
     
@@ -215,6 +216,12 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             num_herders=new_stage.num_herders,
         )
         
+        self.action_decoder = HighLevelAction(
+            R_ref=np.linalg.norm(new_stage.world_size) / 6.0,
+            R_min=1.0,
+            R_max=np.linalg.norm(new_stage.world_size) / 2.0,
+        )
+        
         self._setup_spaces()
         
         self.episode_history = []
@@ -247,6 +254,12 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
                 world_size=new_stage.world_size,
                 num_sheep=new_stage.num_sheep,
                 num_herders=new_stage.num_herders,
+            )
+            
+            self.action_decoder = HighLevelAction(
+                R_ref=np.linalg.norm(new_stage.world_size) / 6.0,
+                R_min=1.0,
+                R_max=np.linalg.norm(new_stage.world_size) / 2.0,
             )
             
             self._setup_spaces()
@@ -366,6 +379,12 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
                 'perception_radius': 5.0,
                 'separation_radius': 2.0,
             },
+        )
+        
+        self.action_decoder = HighLevelAction(
+            R_ref=np.linalg.norm(self.world_size) / 6.0,
+            R_min=1.0,
+            R_max=np.linalg.norm(self.world_size) / 2.0,
         )
         
         self._setup_spaces()

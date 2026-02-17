@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('--num_sheep', type=int, default=10)
     parser.add_argument('--num_herders', type=int, default=3)
     parser.add_argument('--world_size', type=float, nargs=2, default=[50.0, 50.0])
-    parser.add_argument('--episode_length', type=int, default=100)
+    parser.add_argument('--episode_length', type=int, default=150)
     parser.add_argument('--seed', type=int, default=None)
     
     parser.add_argument('--hidden_size', type=int, default=256)
@@ -204,8 +204,6 @@ class Visualizer:
         
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         
-        plt.tight_layout()
-        
     def toggle_pause(self, event):
         self.paused = not self.paused
         
@@ -285,31 +283,27 @@ class Visualizer:
             )
             
             decoded = self.env.action_decoder.decode_action(last_action, target_direction)
-            mu_r = decoded['mu_r']
-            sigma_r = decoded['sigma_r']
-            mu_theta = decoded['mu_theta']
-            kappa = decoded['kappa']
+            wedge_center = decoded['wedge_center']
+            wedge_width = decoded['wedge_width']
+            radius = decoded['radius']
+            asymmetry = decoded['asymmetry']
             
-            station_ring = patches.Circle(fc, mu_r, fill=False, 
+            station_ring = patches.Circle(fc, radius, fill=False, 
                                          color='orange', linewidth=2, alpha=0.7)
             self.ax.add_patch(station_ring)
             
-            main_target_x = fc[0] + mu_r * np.cos(mu_theta)
-            main_target_y = fc[1] + mu_r * np.sin(mu_theta)
+            main_target_x = fc[0] + radius * np.cos(wedge_center)
+            main_target_y = fc[1] + radius * np.sin(wedge_center)
             self.ax.plot(main_target_x, main_target_y, 'o', color='red', 
                         markersize=12, markeredgecolor='darkred', markeredgewidth=2)
             
-            if kappa < 0.1:
-                wedge_angle = np.pi
-            else:
-                wedge_angle = 2.0 / np.sqrt(kappa)
-            wedge_angle = min(wedge_angle, np.pi)
+            wedge_angle = wedge_width * np.pi
             
             wedge = patches.Wedge(
-                fc, mu_r + sigma_r,
-                np.degrees(mu_theta - wedge_angle),
-                np.degrees(mu_theta + wedge_angle),
-                width=2 * sigma_r if sigma_r > 0.1 else mu_r,
+                fc, radius * 1.2,
+                np.degrees(wedge_center - wedge_angle),
+                np.degrees(wedge_center + wedge_angle),
+                width=radius * 0.4,
                 facecolor='orange', alpha=0.2,
                 edgecolor='darkorange', linewidth=1.5,
             )
@@ -336,7 +330,9 @@ class Visualizer:
                                         arrowprops=dict(arrowstyle='->', color='green', 
                                                        lw=1.5, alpha=0.8))
             
-            self.ax.text(fc[0], fc[1] - 2, f'r={mu_r:.1f} k={kappa:.1f}', 
+            mode = self.env.action_decoder.get_formation_mode(wedge_width)
+            spread_deg = wedge_width * 180
+            self.ax.text(fc[0], fc[1] - 2, f'{mode} | r={radius:.1f} w={spread_deg:.0f} a={asymmetry:.2f}', 
                         ha='center', fontsize=9, color='darkorange', fontweight='bold')
         
         for i, hpos in enumerate(herder_positions):
@@ -348,7 +344,26 @@ class Visualizer:
             self.ax.add_patch(evasion_circle)
         
         self.ax.scatter(herder_positions[:, 0], herder_positions[:, 1],
-                       c='blue', s=120, alpha=0.9, marker='s', edgecolors='darkblue')
+                       c='blue', s=120, alpha=0.9, marker='s', edgecolors='darkblue',
+                       label='Herder')
+        
+        legend_elements = [
+            plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='green', 
+                      markersize=15, label='Target'),
+            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                      markersize=10, markeredgecolor='black', label='Sheep'),
+            plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='blue',
+                      markersize=10, markeredgecolor='darkblue', label='Herder'),
+            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
+                      markersize=10, markeredgecolor='darkred', label='Main Target'),
+            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkorange',
+                      markersize=8, markeredgecolor='black', label='Sampled Target'),
+            patches.Patch(facecolor='orange', alpha=0.2, edgecolor='darkorange',
+                         label='Station Region'),
+            patches.Patch(facecolor='blue', alpha=0.08, edgecolor='blue',
+                         linestyle='--', label='Evasion Zone'),
+        ]
+        self.ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
         
         status = "PAUSED" if self.paused else "RUNNING"
         self.ax.set_title(f'Step {self.state.current_step} | Reward: {self.state.total_reward:.1f} | {status}', 
@@ -363,7 +378,8 @@ class Visualizer:
         self.reset_episode()
         self.state.episode_done = False
         
-        self.setup_figure()
+        if self.fig is None:
+            self.setup_figure()
         
         for step in range(self.env.episode_length):
             while self.paused:

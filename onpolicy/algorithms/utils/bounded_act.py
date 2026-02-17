@@ -58,15 +58,20 @@ class TanhNormal(torch.distributions.Normal):
         log_prob = super().log_prob(z)
         log_prob = log_prob.sum(-1, keepdim=True)
         
-        log_det_jacobian = torch.log(1 - tanh_actions.pow(2) + self._eps)
+        log_det_jacobian = torch.log(torch.clamp(1 - tanh_actions.pow(2), min=1e-4))
         log_prob = log_prob - log_det_jacobian.sum(-1, keepdim=True)
+        
+        if torch.isnan(log_prob).any():
+            log_prob = torch.where(torch.isnan(log_prob), torch.zeros_like(log_prob), log_prob)
         
         return log_prob
 
     def _inverse_tanh(self, y):
-        eps = 1e-6
-        y = y.clamp(-1 + eps, 1 - eps)
-        return 0.5 * torch.log((1 + y) / (1 - y))
+        y = y.clamp(-1 + self._eps, 1 - self._eps)
+        z = 0.5 * torch.log((1 + y) / (1 - y))
+        if torch.isnan(z).any():
+            z = torch.where(torch.isnan(z), torch.zeros_like(z), z)
+        return z
 
     def mode(self):
         z = self.mean
@@ -106,7 +111,7 @@ class BoundedDiagGaussian(nn.Module):
         action_low: torch.Tensor = None,
         action_high: torch.Tensor = None,
         use_orthogonal: bool = True,
-        gain: float = 0.01,
+        gain: float = 0.5,
     ):
         super(BoundedDiagGaussian, self).__init__()
 
@@ -130,10 +135,18 @@ class BoundedDiagGaussian(nn.Module):
 
     def forward(self, x: torch.Tensor) -> TanhNormal:
         action_mean = self.fc_mean(x)
+        
+        if torch.isnan(action_mean).any():
+            action_mean = torch.where(
+                torch.isnan(action_mean),
+                torch.zeros_like(action_mean),
+                action_mean
+            )
 
         zeros = torch.zeros(action_mean.size(), device=x.device, dtype=x.dtype)
 
         action_logstd = self.logstd(zeros)
+        action_logstd = torch.clamp(action_logstd, min=-5.0, max=2.0)
 
         return TanhNormal(
             action_mean,
@@ -163,7 +176,7 @@ class BoundedACTLayer(nn.Module):
         action_space,
         inputs_dim: int,
         use_orthogonal: bool = True,
-        gain: float = 0.01,
+        gain: float = 0.5,
     ):
         super(BoundedACTLayer, self).__init__()
 
