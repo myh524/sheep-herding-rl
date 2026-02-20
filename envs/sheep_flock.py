@@ -1,6 +1,9 @@
 """
 SheepFlockEnv: 羊群引导强化学习环境
 实现Gym风格的多智能体环境接口
+
+简化版：无物理限制，策略输出立即生效
+支持离散动作空间
 """
 
 import numpy as np
@@ -10,12 +13,57 @@ from envs.sheep_scenario import SheepScenario
 from envs.high_level_action import HighLevelAction
 
 
+WEDGE_CENTER_VALUES = {
+    "front": 1.0,
+    "left": -0.5,
+    "right": 0.5,
+}
+
+WEDGE_WIDTH_VALUES = {
+    "push": -0.8,
+    "half_surround": 0.0,
+    "full_surround": 1.0,
+}
+
+RADIUS_VALUES = {
+    "near": -0.6,
+    "mid": 0.0,
+    "far": 0.6,
+}
+
+DISCRETE_ACTIONS = {}
+ACTION_INDEX = 0
+
+for center_name, center_val in WEDGE_CENTER_VALUES.items():
+    for width_name, width_val in WEDGE_WIDTH_VALUES.items():
+        for radius_name, radius_val in RADIUS_VALUES.items():
+            if width_name == "full_surround" and center_name != "front":
+                continue
+            
+            action_name = f"{center_name.upper()}_{width_name.upper()}_{radius_name.upper()}"
+            desc = f"{center_name}方向-{width_name}-{radius_name}距离"
+            DISCRETE_ACTIONS[ACTION_INDEX] = {
+                "name": action_name,
+                "action": np.array([center_val, width_val, radius_val, 0.0], dtype=np.float32),
+                "desc": desc,
+                "center": center_name,
+                "width": width_name,
+                "radius": radius_name,
+            }
+            ACTION_INDEX += 1
+
+NUM_DISCRETE_ACTIONS = len(DISCRETE_ACTIONS)
+
+
 class SheepFlockEnv:
     """
-    羊群引导多智能体环境
+    羊群引导多智能体环境（简化版）
     
-    高层控制器通过观测羊群状态，输出站位参数，
-    指导机械狗围堵和引导羊群到达目标位置。
+    特点：
+    - 无物理限制：机械狗直接瞬移到期望位置
+    - 每步更新站位：策略输出立即生效
+    - 简化奖励函数：直接奖励距离和进度
+    - 支持离散动作空间：21个动作（去重后）
     """
     
     def __init__(
@@ -23,40 +71,29 @@ class SheepFlockEnv:
         world_size: Tuple[float, float] = (50.0, 50.0),
         num_sheep: int = 10,
         num_herders: int = 3,
-        episode_length: int = 100,
+        episode_length: int = 60,
         dt: float = 0.1,
+        action_repeat: int = 5,
         reward_config: Optional[Dict[str, float]] = None,
         random_seed: Optional[int] = None,
     ):
-        """
-        初始化环境
-        
-        Args:
-            world_size: 世界大小
-            num_sheep: 羊的数量
-            num_herders: 机械狗数量
-            episode_length: 每个episode的最大步数
-            dt: 时间步长
-            reward_config: 奖励配置
-            random_seed: 随机种子
-        """
         self.world_size = world_size
         self.num_sheep = num_sheep
         self.num_herders = num_herders
         self.episode_length = episode_length
         self.dt = dt
+        self.action_repeat = action_repeat
         self.random_seed = random_seed
         
-        self.high_level_interval = 5
         self.step_count = 0
         
         self.reward_config = reward_config or {
-            'distance_reward_weight': 1.0,
-            'spread_penalty_weight': 0.1,
+            'distance_weight': 1.0,
+            'progress_weight': 1.5,
+            'spread_penalty_weight': 0.3,
             'success_bonus': 10.0,
-            'timeout_penalty': -5.0,
-            'collision_penalty': -0.5,
-            'time_penalty_weight': 1.0,
+            'quick_success_bonus': 5.0,
+            'time_penalty': 0.02,
         }
         
         self.scenario = SheepScenario(
@@ -76,13 +113,7 @@ class SheepFlockEnv:
         
         self.current_step = 0
         self.prev_distance = None
-        self.prev_potential = None
         
-        # 奖励平滑机制
-        self.reward_history = []
-        self.reward_smoothing_window = 5
-        
-        # 奖励组件诊断日志
         self._reward_components = {}
         
         self._seed = random_seed
@@ -91,11 +122,10 @@ class SheepFlockEnv:
     
     def _setup_spaces(self):
         """Set up observation and action spaces"""
-        self.obs_dim = 10
-        self.action_dim = 4
+        self.obs_dim = 5
         
-        obs_low = np.array([0.0, -1.0, -1.0, 0.0, -1.0, -1.0, 0.0, -1.0, -1.0, 0.0], dtype=np.float32)
-        obs_high = np.array([10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 10.0, 1.0, 1.0, 2.0], dtype=np.float32)
+        obs_low = np.array([0.0, -1.0, -1.0, 0.0, 0.0], dtype=np.float32)
+        obs_high = np.array([10.0, 1.0, 1.0, 1.0, 10.0], dtype=np.float32)
         
         self.observation_space = spaces.Box(
             low=obs_low,
@@ -104,15 +134,8 @@ class SheepFlockEnv:
             dtype=np.float32,
         )
         
-        action_low = np.array([-1.0, -1.0, -1.0, -1.0], dtype=np.float32)
-        action_high = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
-        
-        self.action_space = spaces.Box(
-            low=action_low,
-            high=action_high,
-            shape=(self.action_dim,),
-            dtype=np.float32,
-        )
+        self.action_space = spaces.Discrete(NUM_DISCRETE_ACTIONS)
+        self.action_dim = NUM_DISCRETE_ACTIONS
         
         self.share_observation_space = spaces.Box(
             low=-np.inf,
@@ -122,12 +145,6 @@ class SheepFlockEnv:
         )
     
     def reset(self) -> np.ndarray:
-        """
-        Reset environment
-        
-        Returns:
-            Initial observation
-        """
         self.current_step = 0
         self.step_count = 0
         
@@ -142,77 +159,59 @@ class SheepFlockEnv:
         
         self.scenario.reset(target_position=target_pos)
         self.prev_distance = self.scenario.get_distance_to_target()
-        self.prev_potential = None
         
-        # Reset reward smoothing history
-        self.reward_history = []
         self._reward_components = {}
         
         return self._get_obs()
     
     def get_shared_obs(self) -> np.ndarray:
-        """
-        获取共享观测
-        
-        Returns:
-            共享观测，形状为 (num_herders, obs_dim)
-        """
         return self.scenario.get_shared_observation()
 
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
-        """
-        Execute action
-        
-        High-level decision frequency control:
-        - Only update herder targets every N steps (high_level_interval)
-        - Herders move towards targets with physical constraints
-        - Sheep update with continuous evasion force
-        
-        Args:
-            actions: Action array, shape (num_herders, action_dim)
-        
-        Returns:
-            obs: Observation
-            reward: Reward
-            done: Done flag
-            info: Additional info
-        """
         self.current_step += 1
         self.step_count += 1
         
-        if self.step_count % self.high_level_interval == 1:
-            target_positions = self._sample_herder_positions(actions)
-            self.scenario.set_herder_targets(target_positions)
+        action_idx = int(actions) if np.isscalar(actions) else int(actions[0])
+        action = DISCRETE_ACTIONS[action_idx]["action"]
         
-        self.scenario.update_herders(self.dt)
+        target_positions = self._sample_herder_positions(action)
+        self.scenario.set_herder_targets(target_positions)
         
-        self.scenario.update_sheep(self.dt)
+        total_reward = 0.0
+        reward_components_sum = {}
+        done = False
         
-        reward = self._compute_reward()
+        for sub_step in range(self.action_repeat):
+            self.scenario.update_herders(self.dt)
+            self.scenario.update_sheep(self.dt)
+            
+            reward = self._compute_reward()
+            total_reward += reward
+            
+            for key, value in self._reward_components.items():
+                if key not in reward_components_sum:
+                    reward_components_sum[key] = 0.0
+                reward_components_sum[key] += value
+            
+            if self._check_done():
+                done = True
+                break
         
-        done = self._check_done()
+        avg_reward = total_reward / (sub_step + 1)
+        
+        for key in reward_components_sum:
+            if key != 'total_reward':
+                reward_components_sum[key] = reward_components_sum[key] / (sub_step + 1)
+        reward_components_sum['total_reward'] = avg_reward
+        self._reward_components = reward_components_sum
         
         info = self._get_info()
-        
+        info['action_repeat_steps'] = sub_step + 1
         obs = self._get_obs()
         
-        return obs, reward, done, info
+        return obs, avg_reward, done, info
     
-    def _sample_herder_positions(self, actions: np.ndarray) -> np.ndarray:
-        """
-        Sample herder target positions based on actions
-        
-        New Action Space (4D):
-        - wedge_center: Formation center angle (relative to target direction)
-        - wedge_width: Formation spread (0=push, 1=surround)
-        - radius: Distance from flock center
-        - asymmetry: Flank offset for steering
-        
-        Physical constraints:
-        - Minimum distance between herders
-        - Safe distance from flock boundary
-        - World boundary constraints
-        """
+    def _sample_herder_positions(self, action: np.ndarray) -> np.ndarray:
         flock_center = self.scenario.get_flock_center()
         target = self.scenario.get_target_position()
         
@@ -223,8 +222,6 @@ class SheepFlockEnv:
         
         positions = np.zeros((self.num_herders, 2), dtype=np.float32)
         
-        action = actions[0] if actions.ndim > 1 else actions
-        
         decoded = self.action_decoder.decode_action(action, target_direction)
         
         angles, radii = self.action_decoder.sample_herder_positions(
@@ -232,221 +229,75 @@ class SheepFlockEnv:
             **decoded
         )
         
-        min_herder_distance = 2.0
-        flock_safe_distance = 3.0
-        
         for i in range(self.num_herders):
             pos = flock_center + np.array([
                 radii[i] * np.cos(angles[i]),
                 radii[i] * np.sin(angles[i])
             ])
             
-            for j in range(i):
-                diff = pos - positions[j]
-                dist = np.linalg.norm(diff)
-                if dist < min_herder_distance and dist > 0:
-                    correction = diff / dist * (min_herder_distance - dist) / 2
-                    pos = pos + correction
-                    positions[j] = positions[j] - correction
-            
-            pos = np.clip(pos, [flock_safe_distance, flock_safe_distance], 
-                         [self.world_size[0] - flock_safe_distance, 
-                          self.world_size[1] - flock_safe_distance])
-            
             positions[i] = pos
         
         return positions
     
     def _compute_reward(self) -> float:
-        """
-        Redesigned reward function for stable training convergence
-        
-        Design Principles:
-        ==================
-        1. SMOOTH REWARD SIGNALS: Use continuous, differentiable reward functions
-        2. PROGRESSIVE REWARDS: Encourage incremental progress toward goals
-        3. STABLE SCALING: Normalize all reward components to similar ranges
-        4. BALANCED OBJECTIVES: Balance distance, formation, and efficiency
-        5. PREDICTABLE REWARDS: Avoid discrete jumps and sparse signals
-        
-        Improvements (2026-02-17):
-        ==========================
-        - Reduced success bonus from +7.0 to +3.0 to balance reward scales
-        - Use np.tanh for progress reward to avoid sign flip penalty
-        - Relaxed reward clipping lower bound from -1.0 to -2.0
-        - Added reward smoothing mechanism
-        - Added diagnostic logging for reward components
-        
-        Reward Components:
-        ==================
-        1. Distance Progress Reward (dense, smooth)
-        2. Formation Quality Reward (stable, normalized)
-        3. Direction Alignment Reward (continuous)
-        4. Efficiency Bonus (gentle time penalty)
-        5. Success Bonus (moderate, not overwhelming)
-        """
         reward = 0.0
         
-        # Get current state
         current_distance = self.scenario.get_distance_to_target()
         max_distance = np.linalg.norm(self.world_size)
         max_distance = max(max_distance, 1.0)
         
-        # ========================================
-        # 1. SMOOTH DISTANCE REWARD (Core Signal)
-        # ========================================
-        # Use smooth exponential decay instead of discrete milestones
+        cfg = self.reward_config
         distance_ratio = current_distance / max_distance
         
-        # Exponential reward: r = exp(-k * d) gives smooth, bounded reward
-        # k=3 gives reasonable decay: d=0 -> r=1.0, d=0.5 -> r=0.22, d=1.0 -> r=0.05
-        distance_reward = np.exp(-3.0 * distance_ratio)
-        reward += distance_reward * 1.0  # Scale to [0.05, 1.0]
+        distance_reward = -distance_ratio * cfg.get('distance_weight', 2.0)
+        reward += distance_reward
         
-        # ========================================
-        # 2. DISTANCE PROGRESS REWARD (Shaping)
-        # ========================================
-        # Reward for making progress toward target
         progress_reward = 0.0
         if self.prev_distance is not None:
-            distance_delta = self.prev_distance - current_distance
-            # Normalize by max possible progress per step
-            max_progress = 5.0 * self.dt  # Max herder speed * dt
-            progress_ratio = distance_delta / max(max_progress, 0.1)
-            # IMPROVEMENT: Use tanh instead of clip to avoid sign flip penalty
-            # tanh provides smooth transition and avoids harsh clipping
-            progress_reward = np.tanh(progress_ratio) * 0.3
+            progress = (self.prev_distance - current_distance) / max_distance
+            progress_reward = progress * cfg.get('progress_weight', 3.0)
             reward += progress_reward
         
         self.prev_distance = current_distance
         
-        # ========================================
-        # 3. FORMATION QUALITY REWARD (Stable)
-        # ========================================
-        # Flock spread: reward for maintaining reasonable spread
         spread = self.scenario.get_flock_spread()
-        target_spread = 4.0  # Ideal spread
-        spread_error = abs(spread - target_spread) / max(target_spread, 1.0)
-        # Smooth penalty using exponential
-        spread_penalty = -0.1 * (1.0 - np.exp(-spread_error))
-        reward += spread_penalty
+        ideal_spread = 5.0
+        if spread > ideal_spread:
+            spread_penalty = -cfg.get('spread_penalty_weight', 0.1) * (spread - ideal_spread) / 10.0
+            reward += spread_penalty
+        else:
+            spread_penalty = 0.0
         
-        # Flock cohesion: reward for keeping sheep together
-        # Use spread variance instead of eigenvalue ratio (more stable)
-        cohesion_bonus = 0.0
-        if spread < 8.0:  # Reasonable spread
-            cohesion_bonus = 0.1 * np.exp(-spread / 8.0)
-            reward += cohesion_bonus
-        
-        # ========================================
-        # 4. DIRECTION ALIGNMENT REWARD (Continuous)
-        # ========================================
-        flock_center = self.scenario.get_flock_center()
-        target = self.scenario.get_target_position()
-        flock_velocity = self.scenario.get_flock_direction()
-        
-        # Calculate flock speed (average velocity magnitude)
-        velocities = np.array([s.velocity for s in self.scenario.sheep])
-        mean_velocity = np.mean(velocities, axis=0)
-        flock_speed = np.linalg.norm(mean_velocity)
-        
-        # Direction alignment (continuous, not thresholded)
-        target_direction = target - flock_center
-        target_direction_norm = np.linalg.norm(target_direction)
-        
-        alignment_reward = 0.0
-        proximity_bonus = 0.0
-        if target_direction_norm > 1e-6:
-            target_unit = target_direction / target_direction_norm
-            
-            # Alignment reward: dot product of velocity and target direction
-            # This is naturally in [-1, 1] range
-            if flock_speed > 0.05:  # Lower threshold for more consistent signal
-                alignment = np.dot(flock_velocity, target_unit)
-                # Smooth alignment reward: only reward positive alignment
-                alignment_reward = max(0.0, alignment) * 0.2
-                reward += alignment_reward
-            else:
-                # Small bonus for stationary flock near target
-                if distance_ratio < 0.2:
-                    reward += 0.05
-        
-        # ========================================
-        # 5. PROXIMITY BONUS (Progressive)
-        # ========================================
-        # Smooth proximity bonus using sigmoid-like function
-        # This provides continuous reward as distance decreases
-        proximity_bonus = 0.2 / (1.0 + np.exp(10.0 * (distance_ratio - 0.3)))
-        reward += proximity_bonus
-        
-        # ========================================
-        # 6. SUCCESS BONUS (Moderate - REDUCED)
-        # ========================================
-        # IMPROVEMENT: Reduced success bonus to prevent overwhelming other signals
-        # Original: +5.0 base + +2.0 quick bonus = +7.0 total
-        # New: +2.0 base + +1.0 quick bonus = +3.0 total
         success_bonus = 0.0
         if self.scenario.is_flock_at_target(threshold=5.0):
-            # Moderate bonus, not too large to avoid policy collapse
-            success_bonus = 2.0  # Reduced from 5.0
+            success_bonus = cfg.get('success_bonus', 10.0)
             reward += success_bonus
-            # Additional bonus for quick success
+            
             if self.current_step < self.episode_length * 0.5:
-                quick_bonus = 1.0  # Reduced from 2.0
+                quick_bonus = cfg.get('quick_success_bonus', 5.0)
                 reward += quick_bonus
                 success_bonus += quick_bonus
         
-        # ========================================
-        # 7. EFFICIENCY PENALTY (Gentle)
-        # ========================================
-        # Very gentle time penalty to encourage efficiency
-        # Not too strong to avoid confusing the agent
-        time_penalty = -0.002
+        time_penalty = -cfg.get('time_penalty', 0.01)
         reward += time_penalty
         
-        # ========================================
-        # 8. REWARD NORMALIZATION & SAFETY
-        # ========================================
-        # IMPROVEMENT: Relaxed lower bound from -1.0 to -2.0
-        # This preserves more gradient information for learning
-        # Expected range: [-1.5, 4.0] typically
-        reward = np.clip(reward, -2.0, 10.0)
+        reward = np.clip(reward, -5.0, 20.0)
         
-        # Safety check for numerical stability
         if np.isnan(reward) or np.isinf(reward):
             reward = 0.0
         
-        # ========================================
-        # 9. REWARD SMOOTHING (NEW)
-        # ========================================
-        # Apply exponential moving average smoothing
-        self.reward_history.append(reward)
-        if len(self.reward_history) > self.reward_smoothing_window:
-            self.reward_history.pop(0)
-        
-        smoothed_reward = float(np.mean(self.reward_history))
-        
-        # ========================================
-        # 10. DIAGNOSTIC LOGGING (NEW)
-        # ========================================
-        # Record reward components for analysis
         self._reward_components = {
             'distance_reward': float(distance_reward),
             'progress_reward': float(progress_reward),
             'spread_penalty': float(spread_penalty),
-            'cohesion_bonus': float(cohesion_bonus),
-            'alignment_reward': float(alignment_reward),
-            'proximity_bonus': float(proximity_bonus),
             'success_bonus': float(success_bonus),
             'time_penalty': float(time_penalty),
-            'raw_reward': float(reward),
-            'smoothed_reward': smoothed_reward,
+            'total_reward': float(reward),
         }
         
-        return smoothed_reward
+        return float(reward)
     
     def _check_done(self) -> bool:
-        """检查episode是否结束"""
         if self.scenario.is_flock_at_target(threshold=5.0):
             return True
         
@@ -456,11 +307,9 @@ class SheepFlockEnv:
         return False
     
     def _get_obs(self) -> np.ndarray:
-        """获取观测"""
         return self.scenario.get_observation()
     
     def _get_info(self) -> Dict[str, Any]:
-        """获取额外信息"""
         return {
             'step': self.current_step,
             'distance_to_target': self.scenario.get_distance_to_target(),
@@ -471,19 +320,12 @@ class SheepFlockEnv:
         }
     
     def render(self, mode: str = 'human') -> Optional[np.ndarray]:
-        """
-        渲染环境
-        
-        Args:
-            mode: 渲染模式，'human' 或 'rgb_array'
-        """
         if mode == 'rgb_array':
             return self._render_rgb_array()
         else:
             self._render_human()
     
     def _render_human(self):
-        """控制台渲染"""
         print(f"\n--- Step {self.current_step} ---")
         print(f"Flock center: {self.scenario.get_flock_center()}")
         print(f"Flock spread: {self.scenario.get_flock_spread():.2f}")
@@ -491,7 +333,6 @@ class SheepFlockEnv:
         print(f"Herder positions: {self.scenario.get_herder_positions()}")
     
     def _render_rgb_array(self) -> np.ndarray:
-        """生成RGB图像"""
         img_size = 400
         scale = img_size / max(self.world_size)
         
@@ -515,45 +356,91 @@ class SheepFlockEnv:
         return img
     
     def close(self):
-        """关闭环境"""
         pass
     
     def seed(self, seed: Optional[int] = None):
-        """设置随机种子"""
         self._seed = seed
         if seed is not None:
             np.random.seed(seed)
     
     def get_env_info(self) -> Dict[str, Any]:
-        """获取环境信息"""
         return {
             'num_agents': self.num_herders,
             'obs_dim': self.obs_dim,
             'action_dim': self.action_dim,
             'episode_length': self.episode_length,
             'world_size': self.world_size,
+            'discrete_actions': self.discrete_actions,
         }
+    
+    @staticmethod
+    def get_discrete_action_name(action_idx: int) -> str:
+        if 0 <= action_idx < NUM_DISCRETE_ACTIONS:
+            return DISCRETE_ACTIONS[action_idx]["name"]
+        return "UNKNOWN"
+    
+    @staticmethod
+    def get_discrete_action_desc(action_idx: int) -> str:
+        if 0 <= action_idx < NUM_DISCRETE_ACTIONS:
+            return DISCRETE_ACTIONS[action_idx]["desc"]
+        return "未知动作"
+    
+    @staticmethod
+    def get_action_index(center: str, width: str, radius: str) -> int:
+        for idx, action_info in DISCRETE_ACTIONS.items():
+            if (action_info["center"] == center and 
+                action_info["width"] == width and 
+                action_info["radius"] == radius):
+                return idx
+        return 0
+    
+    @staticmethod
+    def print_action_table():
+        print("\n" + "="*80)
+        print("离散动作表 (共{}个动作)".format(NUM_DISCRETE_ACTIONS))
+        print("="*80)
+        
+        print("\n【参数说明】")
+        print("-"*60)
+        print("方向 (wedge_center):")
+        print("  front  = 1.0  (羊群后方，推羊朝目标走)")
+        print("  left   = -0.5 (左侧)")
+        print("  right  = 0.5  (右侧)")
+        print("\n展开 (wedge_width):")
+        print("  push          = -0.8 (推进队形，稍微分开)")
+        print("  half_surround = 0.0  (半包围 180°)")
+        print("  full_surround = 1.0  (全包围 360°均匀)")
+        print("\n距离 (radius):")
+        print("  near = -0.6 (近距离站位)")
+        print("  mid  = 0.0  (中距离站位)")
+        print("  far  = 0.6  (远距离站位)")
+        
+        print("\n【注意】全包围时方向无意义，只保留front方向")
+        
+        print("\n" + "="*80)
+        print("【动作列表】")
+        print("="*80)
+        
+        current_width = None
+        for idx in range(NUM_DISCRETE_ACTIONS):
+            action_info = DISCRETE_ACTIONS[idx]
+            
+            if action_info["width"] != current_width:
+                current_width = action_info["width"]
+                print(f"\n--- {current_width.upper()} 模式 ---")
+            
+            action_str = ", ".join([f"{v:.1f}" for v in action_info["action"]])
+            print(f"  [{idx:2d}] {action_info['name']:30s} | [{action_str}]")
+        
+        print("\n" + "="*80)
 
 
 class SheepFlockEnvWrapper:
-    """
-    多进程环境包装器
-    
-    用于创建多个并行环境，符合MAPPO训练框架的接口
-    """
-    
     def __init__(
         self,
         num_envs: int = 1,
         **kwargs
     ):
-        """
-        初始化包装器
-        
-        Args:
-            num_envs: 并行环境数量
-            **kwargs: 传递给SheepFlockEnv的参数
-        """
         self.num_envs = num_envs
         self.envs = [SheepFlockEnv(**kwargs) for _ in range(num_envs)]
         
@@ -563,30 +450,17 @@ class SheepFlockEnvWrapper:
         self.share_observation_space = self.envs[0].share_observation_space
     
     def reset(self) -> np.ndarray:
-        """重置所有环境"""
         obs_list = [env.reset() for env in self.envs]
         return np.array(obs_list)
     
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict]]:
-        """
-        在所有环境中执行动作
-        
-        Args:
-            actions: 形状为 (num_envs, num_agents, action_dim) 的动作数组
-        
-        Returns:
-            obs: 观测数组
-            rewards: 奖励数组
-            dones: 结束标志数组
-            infos: 信息列表
-        """
         obs_list = []
         rewards_list = []
         dones_list = []
         infos_list = []
         
         for i, env in enumerate(self.envs):
-            env_actions = actions[i] if actions.ndim > 2 else actions
+            env_actions = actions[i] if actions.ndim > 1 else actions
             obs, reward, done, info = env.step(env_actions)
             obs_list.append(obs)
             rewards_list.append(reward)
@@ -601,15 +475,16 @@ class SheepFlockEnvWrapper:
         )
     
     def render(self, mode: str = 'human'):
-        """渲染第一个环境"""
         return self.envs[0].render(mode)
     
     def close(self):
-        """关闭所有环境"""
         for env in self.envs:
             env.close()
     
     def seed(self, seed: Optional[int] = None):
-        """设置随机种子"""
         for i, env in enumerate(self.envs):
             env.seed(seed + i if seed is not None else None)
+
+
+if __name__ == "__main__":
+    SheepFlockEnv.print_action_table()

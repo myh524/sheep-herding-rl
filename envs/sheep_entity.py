@@ -27,6 +27,7 @@ class SheepEntity:
         max_force: float = 0.1,
         perception_radius: float = 5.0,
         separation_radius: float = 2.0,
+        damping_coefficient: float = 0.95,
     ):
         self.position = np.array(position, dtype=np.float32)
         
@@ -44,19 +45,29 @@ class SheepEntity:
         self.max_force = max_force
         self.perception_radius = perception_radius
         self.separation_radius = separation_radius
+        self.damping_coefficient = damping_coefficient
         
         self.acceleration = np.zeros(2, dtype=np.float32)
+        self.is_evading = False
     
     def update(self, dt: float = 0.1):
-        """更新羊的位置和速度"""
+        """
+        更新羊的位置和速度
+        
+        改进：当羊不在逃避状态时，应用阻尼系数让速度尽快减下来
+        """
         self.velocity += self.acceleration * dt
         
         speed = np.linalg.norm(self.velocity)
         if speed > self.max_speed:
             self.velocity = self.velocity / speed * self.max_speed
         
+        if not self.is_evading:
+            self.velocity *= self.damping_coefficient
+        
         self.position += self.velocity * dt
         self.acceleration = np.zeros(2, dtype=np.float32)
+        self.is_evading = False
     
     def apply_force(self, force: np.ndarray):
         """应用转向力"""
@@ -143,6 +154,8 @@ class SheepEntity:
     def evasion(self, herders: List[np.ndarray], evasion_radius: float = 8.0) -> np.ndarray:
         """
         逃避规则: 远离机械狗
+        
+        改进：当羊在逃避范围内时，设置 is_evading 标志，避免速度被阻尼
         """
         if not herders:
             return np.zeros(2, dtype=np.float32)
@@ -160,6 +173,7 @@ class SheepEntity:
                 count += 1
         
         if count > 0:
+            self.is_evading = True
             steer = steer / count
             if np.linalg.norm(steer) > 0:
                 steer = steer / np.linalg.norm(steer) * self.max_speed * 1.5

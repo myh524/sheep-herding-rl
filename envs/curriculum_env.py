@@ -90,6 +90,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         dt: float = 0.1,
         random_seed: Optional[int] = None,
         auto_advance: bool = True,
+        action_repeat: int = 5,
     ):
         """
         Initialize curriculum learning environment
@@ -100,6 +101,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             dt: Time step
             random_seed: Random seed
             auto_advance: Whether to automatically advance to next stage
+            action_repeat: Number of sub-steps to repeat each action
         """
         self.stages = stages if stages is not None else self.DEFAULT_STAGES
         self.current_stage_idx = start_stage
@@ -117,6 +119,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             episode_length=current_stage.episode_length,
             dt=dt,
             random_seed=random_seed,
+            action_repeat=action_repeat,
         )
     
     def _get_current_stage(self) -> CurriculumStage:
@@ -304,6 +307,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
         episode_length: int = 100,
         dt: float = 0.1,
         random_seed: Optional[int] = None,
+        action_repeat: int = 5,
     ):
         """
         初始化随机化环境
@@ -316,6 +320,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             episode_length: 每个episode的最大步数
             dt: 时间步长
             random_seed: 随机种子
+            action_repeat: 每个动作重复执行的子步数
         """
         self.num_sheep_range = num_sheep_range
         self.num_herders_range = num_herders_range
@@ -338,6 +343,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             episode_length=episode_length,
             dt=dt,
             random_seed=random_seed,
+            action_repeat=action_repeat,
         )
     
     def reset(self) -> np.ndarray:

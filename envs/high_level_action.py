@@ -18,9 +18,8 @@ Based on real sheep herding physics and practical engineering considerations:
 
 3. PHYSICAL INTUITION:
    - wedge_width=0: All herders at same angle (push mode)
-   - wedge_width=1: Herders spread 360° (surround mode)
-   - asymmetry>0: Right flank emphasis (steer flock left)
-   - asymmetry<0: Left flank emphasis (steer flock right)
+   - wedge_width=0.5: Herders spread 180° (half surround)
+   - wedge_width=1: Herders spread 360° uniformly (full surround)
 
 Action Space (4D):
 ==================
@@ -113,7 +112,8 @@ class HighLevelAction:
         Formation Logic:
         1. wedge_width controls total spread:
            - 0.0: All herders at wedge_center (push mode)
-           - 1.0: Herders spread 360° around flock (surround mode)
+           - 0.5: Herders spread 180° (half surround)
+           - 1.0: Herders spread 360° uniformly around flock (full surround)
         
         2. asymmetry controls flank emphasis:
            - 0.0: Symmetric distribution around wedge_center
@@ -133,26 +133,32 @@ class HighLevelAction:
         angles = np.zeros(num_herders, dtype=np.float32)
         radii = np.zeros(num_herders, dtype=np.float32)
         
-        total_spread = wedge_width * np.pi
-        
-        center_offset = asymmetry * total_spread
-        formation_center = wedge_center + center_offset
-        formation_center = np.arctan2(np.sin(formation_center), np.cos(formation_center))
-        
-        if num_herders == 1:
-            angles[0] = formation_center
-            radii[0] = radius
-        else:
+        if wedge_width >= 1.0:
             for i in range(num_herders):
-                fraction = i / (num_herders - 1)
-                
-                angle_offset = (fraction - 0.5) * total_spread
-                angles[i] = formation_center + angle_offset
+                angles[i] = wedge_center + i * (2 * np.pi / num_herders)
                 angles[i] = np.arctan2(np.sin(angles[i]), np.cos(angles[i]))
-                
-                edge_factor = abs(fraction - 0.5) * 2
-                radii[i] = radius * (1.0 + edge_factor * 0.1)
-                radii[i] = np.clip(radii[i], self.R_min, self.R_max)
+                radii[i] = radius
+        else:
+            total_spread = wedge_width * 2 * np.pi
+            
+            center_offset = asymmetry * total_spread
+            formation_center = wedge_center + center_offset
+            formation_center = np.arctan2(np.sin(formation_center), np.cos(formation_center))
+            
+            if num_herders == 1:
+                angles[0] = formation_center
+                radii[0] = radius
+            else:
+                for i in range(num_herders):
+                    fraction = i / (num_herders - 1)
+                    
+                    angle_offset = (fraction - 0.5) * total_spread
+                    angles[i] = formation_center + angle_offset
+                    angles[i] = np.arctan2(np.sin(angles[i]), np.cos(angles[i]))
+                    
+                    edge_factor = abs(fraction - 0.5) * 2
+                    radii[i] = radius * (1.0 + edge_factor * 0.1)
+                    radii[i] = np.clip(radii[i], self.R_min, self.R_max)
         
         return angles, radii
     
@@ -172,8 +178,10 @@ class HighLevelAction:
             return "NARROW"
         elif wedge_width < 0.8:
             return "WIDE"
+        elif wedge_width < 1.0:
+            return "HALF_SURROUND"
         else:
-            return "SURROUND"
+            return "FULL_SURROUND"
 
 
 class FormationAnalyzer:
@@ -199,7 +207,10 @@ class FormationAnalyzer:
         
         mode = HighLevelAction().get_formation_mode(wedge_width)
         
-        spread_deg = wedge_width * 180
+        if wedge_width >= 1.0:
+            spread_deg = 360
+        else:
+            spread_deg = wedge_width * 360
         
         if abs(asymmetry) < 0.1:
             flank = "centered"

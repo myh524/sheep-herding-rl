@@ -1,24 +1,23 @@
 #!/bin/bash
-# Visualization Script for Trained PPO Model
+# Policy Evaluation Script
 
-MODEL_PATH="/home/hmy524/github_project/high_layer/results/sheep_herding/default/ppo/seed1/20260221_010130/models/model_49035.pt"
-NUM_EPISODES=5
+MODEL_PATH="results/sheep_herding/default/ppo/seed1/xxx/models/model_100000.pt"
+NUM_EPISODES=100
 
 echo "=========================================="
-echo "Model Visualization"
+echo "Policy Evaluation"
 echo "=========================================="
 echo "Model path: $MODEL_PATH"
 echo "Number of episodes: $NUM_EPISODES"
 echo "=========================================="
 
-python -m tools.visualize \
+python -m tools.evaluate_policy \
     --model_path "$MODEL_PATH" \
     --num_episodes $NUM_EPISODES \
-    --render_delay 30 \
     --num_sheep 10 \
     --num_herders 3 \
     --episode_length 60
 
 echo "=========================================="
-echo "Visualization completed!"
+echo "Evaluation completed!"
 echo "=========================================="

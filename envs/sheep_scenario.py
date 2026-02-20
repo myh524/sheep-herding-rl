@@ -147,54 +147,19 @@ class SheepScenario:
     
     def update_herders(self, dt: float = 0.1):
         """
-        更新机械狗位置（向目标移动，自动避开羊群）
+        更新机械狗位置
         
-        使用势场法：
-        - 目标点产生吸引力
-        - 羊群产生排斥力（当距离过近时）
+        改进：直接刷新到网络输出的期望位置，取消物理限制
+        这样可以让狗的位置每次都直接更新到策略网络输出的目标位置
         
         Args:
-            dt: 时间步长
+            dt: 时间步长（保留参数以兼容接口，但不再使用）
         """
         if not (hasattr(self, 'herder_targets') and self.herder_targets is not None):
             return
         
-        flock_center = self.get_flock_center()
-        flock_spread = self.get_flock_spread()
-        avoid_radius = flock_spread * 2.5 + 3.0
-        
         for i in range(self.num_herders):
-            current_pos = self.herder_positions[i]
-            target_pos = self.herder_targets[i]
-            
-            to_target = target_pos - current_pos
-            target_dist = np.linalg.norm(to_target)
-            
-            if target_dist < 0.1:
-                continue
-            
-            attract_force = to_target / target_dist
-            
-            to_flock = current_pos - flock_center
-            flock_dist = np.linalg.norm(to_flock)
-            
-            repel_force = np.zeros(2, dtype=np.float32)
-            if flock_dist < avoid_radius and flock_dist > 0.1:
-                repel_strength = (avoid_radius - flock_dist) / avoid_radius
-                repel_force = (to_flock / flock_dist) * repel_strength * 1.5
-            
-            move_direction = attract_force + repel_force
-            move_norm = np.linalg.norm(move_direction)
-            
-            if move_norm > 0.1:
-                move_direction = move_direction / move_norm
-                self.herder_positions[i] += move_direction * min(5.0 * dt, target_dist)
-            
-            self.herder_positions[i] = np.clip(
-                self.herder_positions[i],
-                [0, 0],
-                [self.world_size[0], self.world_size[1]]
-            )
+            self.herder_positions[i] = self.herder_targets[i].copy()
     
     def set_herder_positions(self, positions: np.ndarray):
         """
@@ -418,21 +383,18 @@ class SheepScenario:
     
     def get_observation(self) -> np.ndarray:
         """
-        Get normalized observation vector (10-dimensional)
+        Get normalized observation vector (5-dimensional)
         
-        Observation structure:
+        Simplified observation structure:
         - [0]: d_goal / r_max - distance from flock center to target (normalized)
         - [1:3]: cos φ, sin φ - direction from flock to target (unit vector)
         - [3]: flock_speed / max_speed - flock speed magnitude (normalized)
-        - [4:6]: cos θ_vel, sin θ_vel - flock velocity direction (relative to target)
-        - [6]: spread / r_max - flock spread (normalized)
-        - [7:9]: cos θ_main, sin θ_main - flock main direction (relative to target)
-        - [9]: num_sheep / 30.0 - flock size (normalized)
+        - [4]: spread / r_max - flock spread (normalized)
         
         Returns:
-            10-dimensional normalized observation vector
+            5-dimensional normalized observation vector
         """
-        obs = np.zeros(10, dtype=np.float32)
+        obs = np.zeros(5, dtype=np.float32)
         
         flock_center = self.get_flock_center()
         target = self.target_position
@@ -451,35 +413,14 @@ class SheepScenario:
             obs[1] = 1.0
             obs[2] = 0.0
         
-        theta_target = np.arctan2(to_target[1], to_target[0])
-        
         velocities = np.array([s.velocity for s in self.sheep])
         mean_velocity = np.mean(velocities, axis=0)
         flock_speed = np.linalg.norm(mean_velocity)
         max_sheep_speed = 3.0
         obs[3] = np.clip(flock_speed / max_sheep_speed, 0.0, 1.0)
         
-        if flock_speed > 1e-6:
-            vel_direction = mean_velocity / flock_speed
-            theta_vel = np.arctan2(vel_direction[1], vel_direction[0])
-            theta_vel_rel = theta_vel - theta_target
-            theta_vel_rel = np.arctan2(np.sin(theta_vel_rel), np.cos(theta_vel_rel))
-            obs[4] = np.cos(theta_vel_rel)
-            obs[5] = np.sin(theta_vel_rel)
-        else:
-            obs[4] = 0.0
-            obs[5] = 0.0
-        
         spread = self.get_flock_spread()
-        obs[6] = np.clip(spread / r_max, 0.0, 10.0)
-        
-        theta_main = self.get_flock_main_direction()
-        theta_rel = theta_main - theta_target
-        theta_rel = np.arctan2(np.sin(theta_rel), np.cos(theta_rel))
-        obs[7] = np.cos(theta_rel)
-        obs[8] = np.sin(theta_rel)
-        
-        obs[9] = np.clip(len(self.sheep) / 30.0, 0.0, 2.0)
+        obs[4] = np.clip(spread / r_max, 0.0, 10.0)
         
         obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
         
@@ -489,8 +430,8 @@ class SheepScenario:
         """
         Get shared observation vector (for centralized Critic)
         
-        Uses 10-dim observation, extended with individual herder positions
-        Shape: (obs_dim + num_herders * 2,) = (10 + 3 * 2,) = (16,)
+        Uses 5-dim observation, extended with individual herder positions
+        Shape: (obs_dim + num_herders * 2,) = (5 + 3 * 2,) = (11,)
         """
         obs = self.get_observation()
         

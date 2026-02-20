@@ -21,34 +21,46 @@ class SimpleLogger:
         self.save_folder = save_folder
         os.makedirs(save_folder, exist_ok=True)
         self.log_file = open(os.path.join(save_folder, 'training_log.txt'), 'w')
-        self.json_log_file = open(os.path.join(save_folder, 'training_metrics.json'), 'w')
         self.metrics_history = []
         
+        self.console_keys = ['episode', 'total_steps', 'avg_reward', 'value_loss', 'policy_loss']
+        
     def log(self, metrics):
-        parts = []
+        all_parts = []
         for k, v in metrics.items():
             if isinstance(v, float):
-                parts.append(f'{k}: {v:.6f}')
+                all_parts.append(f'{k}: {v:.6f}')
             else:
-                parts.append(f'{k}: {v}')
-        msg = ' | '.join(parts)
-        print(msg)
-        self.log_file.write(msg + '\n')
+                all_parts.append(f'{k}: {v}')
+        full_msg = ' | '.join(all_parts)
+        self.log_file.write(full_msg + '\n')
         self.log_file.flush()
         
-        # 保存到JSON历史记录
+        console_parts = []
+        for k in self.console_keys:
+            if k in metrics:
+                v = metrics[k]
+                if isinstance(v, float):
+                    console_parts.append(f'{k}: {v:.6f}')
+                else:
+                    console_parts.append(f'{k}: {v}')
+        console_msg = ' | '.join(console_parts)
+        print(console_msg)
+        
         self.metrics_history.append(metrics)
         
-    def save_json(self):
-        """保存完整的训练历史到JSON文件"""
+        self._save_json()
+        
+    def _save_json(self):
+        """保存完整的训练历史到JSON文件（每次log都保存，防止数据丢失）"""
         import json
-        with open(os.path.join(self.save_folder, 'training_metrics.json'), 'w') as f:
+        json_path = os.path.join(self.save_folder, 'training_metrics.json')
+        with open(json_path, 'w') as f:
             json.dump(self.metrics_history, f, indent=2)
         
     def close(self):
-        self.save_json()
+        self._save_json()
         self.log_file.close()
-        self.json_log_file.close()
 
 
 def parse_args():
@@ -59,8 +71,10 @@ def parse_args():
 
     parser.add_argument('--num_sheep', type=int, default=10)
     parser.add_argument('--num_herders', type=int, default=3)
-    parser.add_argument('--episode_length', type=int, default=150)
+    parser.add_argument('--episode_length', type=int, default=60)
     parser.add_argument('--world_size', type=float, nargs=2, default=[50.0, 50.0])
+    parser.add_argument('--action_repeat', type=int, default=5,
+                        help='Number of sub-steps to repeat each action')
     
     parser.add_argument('--use_curriculum', action='store_true', default=False,
                         help='Use curriculum learning for training')
@@ -68,6 +82,8 @@ def parse_args():
                         help='Use randomized environment for generalization training')
     parser.add_argument('--start_stage', type=int, default=0,
                         help='Starting stage for curriculum learning')
+    parser.add_argument('--discrete_actions', action='store_true', default=False,
+                        help='Use discrete action space instead of continuous')
 
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--num_env_steps', type=int, default=1000000)
@@ -87,8 +103,8 @@ def parse_args():
                         help='Enable clip parameter annealing during training')
     parser.add_argument('--value_loss_coef', type=float, default=0.5)
     parser.add_argument('--entropy_coef', type=float, default=0.05)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--gae_lambda', type=float, default=0.98)
+    parser.add_argument('--gamma', type=float, default=0.95)
+    parser.add_argument('--gae_lambda', type=float, default=0.92)
     parser.add_argument('--use_adaptive_gae', action='store_true', default=False)
     parser.add_argument('--gae_lambda_min', type=float, default=0.9)
     parser.add_argument('--gae_lambda_max', type=float, default=0.995)
@@ -97,6 +113,8 @@ def parse_args():
     parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--layer_N', type=int, default=3)
     parser.add_argument('--use_ReLU', action='store_true', default=True)
+    parser.add_argument('--use_LeakyReLU', action='store_true', default=False,
+                        help='Use LeakyReLU instead of ReLU to avoid dead neurons')
     parser.add_argument('--network_architecture', type=str, default='mlp', choices=['mlp', 'improved_mlp', 'resnet', 'lstm'],
                         help='Network architecture to use: mlp, improved_mlp, resnet, lstm')
     parser.add_argument('--use_layer_norm', action='store_true', default=True)
@@ -150,12 +168,14 @@ def make_train_env(args):
         env = CurriculumSheepFlockEnv(
             start_stage=args.start_stage,
             random_seed=args.seed,
+            action_repeat=args.action_repeat,
         )
     elif args.use_randomized:
         from envs import RandomizedSheepFlockEnv
         env = RandomizedSheepFlockEnv(
             episode_length=args.episode_length,
             random_seed=args.seed,
+            action_repeat=args.action_repeat,
         )
     else:
         from envs import SheepFlockEnv
@@ -165,6 +185,7 @@ def make_train_env(args):
             num_herders=args.num_herders,
             episode_length=args.episode_length,
             random_seed=args.seed,
+            action_repeat=args.action_repeat,
         )
     return env
 
@@ -264,9 +285,27 @@ class PPOTrainer:
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.logger = SimpleLogger(run_dir)
+        
+        self._save_config(args)
 
         self.total_num_steps = 0
         self.episode = 0
+        
+        if hasattr(self.policy, 'check_initialization'):
+            self.policy.check_initialization()
+
+    def _save_config(self, args):
+        """保存训练配置到文件"""
+        import json
+        config_path = os.path.join(self.run_dir, 'config.json')
+        config = vars(args)
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        config_txt_path = os.path.join(self.run_dir, 'config.txt')
+        with open(config_txt_path, 'w') as f:
+            for key, value in sorted(config.items()):
+                f.write(f'{key}: {value}\n')
 
     def warmup(self):
         obs = self.env.reset()
@@ -429,28 +468,25 @@ class PPOTrainer:
                 else:
                     value_loss = 0.5 * (return_batch - values).pow(2).mean()
 
-                # Calculate KL divergence if using KL penalty
-                if self.use_kl_penalty:
-                    # KL divergence = E[log(pi_old/pi_new)] = E[log_prob_old - log_prob_new]
-                    # Should always be non-negative; use abs() to ensure numerical stability
-                    kl_div = torch.clamp(old_action_log_probs_batch - action_log_probs, min=0.0).mean()
-                    self.kl_divergence = kl_div.item()
-                    # Add KL penalty to loss
-                    kl_loss = kl_div * self.kl_coef
-                    # Calculate value prediction error for adaptive GAE
-                    if self.use_adaptive_gae:
-                        self.value_pred_error = torch.abs(values - return_batch).mean().item()
-                    loss = value_loss * self.args.value_loss_coef + \
-                           action_loss - \
-                           dist_entropy * self.entropy_coef + \
-                           kl_loss
-                else:
-                    # Calculate value prediction error for adaptive GAE
-                    if self.use_adaptive_gae:
-                        self.value_pred_error = torch.abs(values - return_batch).mean().item()
-                    loss = value_loss * self.args.value_loss_coef + \
-                           action_loss - \
-                           dist_entropy * self.entropy_coef
+                # Calculate KL divergence for monitoring (not used in loss)
+                # KL divergence = E[log(pi_old/pi_new)] = E[log_prob_old - log_prob_new]
+                # Should always be non-negative for correct implementation
+                kl_div = (old_action_log_probs_batch - action_log_probs).mean()
+                self.kl_divergence = kl_div.item()
+                
+                # Safety check: KL divergence should be non-negative
+                if self.kl_divergence < -1e-6:
+                    # This indicates a potential bug or numerical instability
+                    pass
+                
+                # Calculate value prediction error for adaptive GAE
+                if self.use_adaptive_gae:
+                    self.value_pred_error = torch.abs(values - return_batch).mean().item()
+                
+                # Standard PPO loss without KL penalty
+                loss = value_loss * self.args.value_loss_coef + \
+                       action_loss - \
+                       dist_entropy * self.entropy_coef
 
                 if torch.isnan(loss) or torch.isinf(loss):
                     continue
@@ -550,7 +586,6 @@ class PPOTrainer:
 
             self.compute_returns()
             train_metrics = self.train()
-            self.adjust_kl_coef()
             self.adjust_gae_lambda()
             self.buffer.after_update()
 
@@ -577,11 +612,8 @@ class PPOTrainer:
                     'lr': current_lr,
                     'entropy_coef': self.entropy_coef,
                     'clip_param': self.clip_param,
+                    'kl_divergence': self.kl_divergence,
                 }
-                
-                if self.use_kl_penalty:
-                    log_data['kl_divergence'] = self.kl_divergence
-                    log_data['kl_coef'] = self.kl_coef
                 
                 if self.use_adaptive_gae:
                     log_data['gae_lambda'] = self.gae_lambda
@@ -593,6 +625,13 @@ class PPOTrainer:
                     curriculum_info = self.env.get_curriculum_info()
                     log_data['stage'] = curriculum_info['current_stage']
                     log_data['success_rate'] = f"{curriculum_info['success_rate']:.2%}"
+                
+                # 记录奖励组件
+                if hasattr(self.env, '_reward_components') and self.env._reward_components:
+                    reward_components = self.env._reward_components
+                    for key, value in reward_components.items():
+                        if key != 'total_reward':
+                            log_data[f'reward_{key}'] = value
                 
                 self.logger.log(log_data)
 
@@ -642,15 +681,6 @@ class PPOTrainer:
             progress = episode / episodes
             self.clip_param = self.args.clip_param - \
                              (self.args.clip_param - self.clip_param_final) * progress
-
-    def adjust_kl_coef(self):
-        if self.use_kl_penalty and self.kl_divergence > 0:
-            if self.kl_divergence > self.target_kl * 1.5:
-                # Increase KL penalty if divergence is too high
-                self.kl_coef = min(self.kl_coef * self.kl_coef_multiplier, self.kl_coef_max)
-            elif self.kl_divergence < self.target_kl * 0.5:
-                # Decrease KL penalty if divergence is too low
-                self.kl_coef = max(self.kl_coef / self.kl_coef_multiplier, self.kl_coef_min)
 
     def adjust_gae_lambda(self):
         if self.use_adaptive_gae and self.value_pred_error > 0:

@@ -1,11 +1,11 @@
 """
-羊群引导环境模块
+Sheep Herding Environment Module
 """
 
 from envs.sheep_entity import SheepEntity
 from envs.sheep_scenario import SheepScenario
 from envs.sheep_flock import SheepFlockEnv, SheepFlockEnvWrapper
-from envs.high_level_action import HighLevelAction, KappaScheduler
+from envs.high_level_action import HighLevelAction
 from envs.curriculum_env import CurriculumSheepFlockEnv, RandomizedSheepFlockEnv
 
 __all__ = [
@@ -14,7 +14,6 @@ __all__ = [
     'SheepFlockEnv',
     'SheepFlockEnvWrapper',
     'HighLevelAction',
-    'KappaScheduler',
     'CurriculumSheepFlockEnv',
     'RandomizedSheepFlockEnv',
 ]

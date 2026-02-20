@@ -15,13 +15,23 @@ class MLPLayer(nn.Module):
         layer_N: int,
         use_orthogonal: bool,
         use_ReLU: bool,
+        use_LeakyReLU: bool = False,
     ):
         super(MLPLayer, self).__init__()
         self._layer_N = layer_N
 
-        active_func = [nn.Tanh(), nn.ReLU()][use_ReLU]
+        # 改进的激活函数选择
+        if use_LeakyReLU:
+            active_func = nn.LeakyReLU(0.01)  # 避免神经元死亡
+            gain = nn.init.calculate_gain('leaky_relu', 0.01)
+        elif use_ReLU:
+            active_func = nn.ReLU()
+            gain = nn.init.calculate_gain('relu')
+        else:
+            active_func = nn.Tanh()
+            gain = nn.init.calculate_gain('tanh')
+        
         init_method = [nn.init.xavier_uniform_, nn.init.orthogonal_][use_orthogonal]
-        gain = nn.init.calculate_gain(["tanh", "relu"][use_ReLU])
 
         def init_(m):
             return init(m, init_method, lambda x: nn.init.constant_(x, 0), gain=gain)
@@ -57,6 +67,7 @@ class MLPBase(nn.Module):
         self._use_feature_normalization = args.use_feature_normalization
         self._use_orthogonal = args.use_orthogonal
         self._use_ReLU = args.use_ReLU
+        self._use_LeakyReLU = getattr(args, 'use_LeakyReLU', False)  # 支持LeakyReLU
         self._stacked_frames = args.stacked_frames
         self._layer_N = args.layer_N
         self.hidden_size = args.hidden_size
@@ -77,6 +88,7 @@ class MLPBase(nn.Module):
             self._layer_N,
             self._use_orthogonal,
             self._use_ReLU,
+            self._use_LeakyReLU,  # 传递LeakyReLU参数
         )
 
     def forward(self, x: torch.tensor):

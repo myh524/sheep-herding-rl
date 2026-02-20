@@ -102,6 +102,10 @@ class BoundedDiagGaussian(nn.Module):
     """
     Bounded Diagonal Gaussian Distribution for continuous action space.
     Uses tanh squashing to enforce action bounds.
+    
+    改进的初始化策略：
+    - 输出层使用小gain (0.01) 避免初始策略过于确定
+    - 保持初始探索性
     """
 
     def __init__(
@@ -111,7 +115,7 @@ class BoundedDiagGaussian(nn.Module):
         action_low: torch.Tensor = None,
         action_high: torch.Tensor = None,
         use_orthogonal: bool = True,
-        gain: float = 0.5,
+        gain: float = 0.01,  # 改进：从0.5改为0.01，避免初始策略过于确定
     ):
         super(BoundedDiagGaussian, self).__init__()
 
