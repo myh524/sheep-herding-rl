@@ -6,7 +6,7 @@ SheepFlockEnv: 羊群引导强化学习环境
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional, Union
 from gym import spaces
-from envs.sheep_scenario import SheepScenario
+from envs.sheep_scenario import SheepScenario, sample_random_target_position
 from envs.high_level_action import HighLevelAction
 
 
@@ -27,6 +27,8 @@ class SheepFlockEnv:
         dt: float = 0.1,
         reward_config: Optional[Dict[str, float]] = None,
         random_seed: Optional[int] = None,
+        use_herder_kinematics: bool = True,
+        end_episode_when_at_target: bool = False,
     ):
         """
         初始化环境
@@ -39,6 +41,9 @@ class SheepFlockEnv:
             dt: 时间步长
             reward_config: 奖励配置
             random_seed: 随机种子
+            use_herder_kinematics: False 时狗直接出现在编队目标（关闭势场运动学）
+            end_episode_when_at_target: True 时羊群进入目标阈值后立刻结束（旧行为）；
+                False 时始终跑满 episode_length，便于学习抵达后仍把羊群控制在目标附近
         """
         self.world_size = world_size
         self.num_sheep = num_sheep
@@ -46,6 +51,7 @@ class SheepFlockEnv:
         self.episode_length = episode_length
         self.dt = dt
         self.random_seed = random_seed
+        self.end_episode_when_at_target = end_episode_when_at_target
         
         self.high_level_interval = 5
         self.step_count = 0
@@ -64,12 +70,12 @@ class SheepFlockEnv:
             num_sheep=num_sheep,
             num_herders=num_herders,
             random_seed=random_seed,
+            use_herder_kinematics=use_herder_kinematics,
         )
         
         self.action_decoder = HighLevelAction(
-            R_ref=np.linalg.norm(world_size) / 6.0,
-            R_min=1.0,
-            R_max=np.linalg.norm(world_size) / 2.0,
+            R_min=5.0,
+            R_max=20.0,
         )
         
         self._setup_spaces()
@@ -135,11 +141,8 @@ class SheepFlockEnv:
             np.random.seed(self._seed)
             self._seed = None
         
-        target_pos = np.array([
-            self.world_size[0] * np.random.uniform(0.7, 0.9),
-            self.world_size[1] * np.random.uniform(0.3, 0.7)
-        ])
-        
+        target_pos = sample_random_target_position(self.world_size)
+
         self.scenario.reset(target_position=target_pos)
         self.prev_distance = self.scenario.get_distance_to_target()
         self.prev_potential = None
@@ -446,14 +449,10 @@ class SheepFlockEnv:
         return smoothed_reward
     
     def _check_done(self) -> bool:
-        """检查episode是否结束"""
-        if self.scenario.is_flock_at_target(threshold=5.0):
+        """检查 episode 是否结束：默认仅按步数截断，不因到达目标提前结束。"""
+        if self.end_episode_when_at_target and self.scenario.is_flock_at_target(threshold=5.0):
             return True
-        
-        if self.current_step >= self.episode_length:
-            return True
-        
-        return False
+        return self.current_step >= self.episode_length
     
     def _get_obs(self) -> np.ndarray:
         """获取观测"""

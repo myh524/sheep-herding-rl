@@ -1053,41 +1053,6 @@ The visualization system (`visualize.py`) provides real-time rendering of the tr
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### AI Agent Collaboration Framework
-
-This project uses an **AI Agent Collaboration Framework** for team coordination, with 7 specialized Agent roles.
-
-#### Agent Roles
-
-| # | Agent | Responsibility |
-|---|-------|----------------|
-| 1 | Project Manager | Overall coordination, task assignment, progress tracking |
-| 2 | Team Coordinator | Team collaboration management, optimization suggestions |
-| 3 | Algorithm Engineer | PPO optimization, hyperparameter tuning |
-| 4 | Environment Engineer | Environment modeling, reward function |
-| 5 | Visualization Engineer | Training visualization, debugging tools |
-| 6 | Quality Analyst | Problem discovery, diagnostic log design |
-| 7 | Documentation Engineer | Documentation maintenance, API docs |
-
-#### Workflow
-
-```
-User ──communicate──> Project Manager ──publish task──> share/tasks/pending.md
-                                                           │
-User ──"1"──> Specialist Agent ──claim task──> Execute ──> reports/
-```
-
-#### Key Files
-
-| File | Description |
-|------|-------------|
-| `.trae/RULES.md` | Project rules (required reading for all Agents) |
-| `.trae/AGENT_DESCRIPTIONS.md` | Agent creation descriptions |
-| `.trae/agents/` | Agent instruction documents |
-| `.trae/share/` | Information sharing center |
-
-For detailed documentation, see the `.trae/` directory.
-
 ---
 
 ## Known Issues & Future Work

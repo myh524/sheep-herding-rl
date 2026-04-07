@@ -5,9 +5,11 @@ Single-agent version without num_agents dimension
 
 import argparse
 import os
+from collections import defaultdict
 import torch
 import numpy as np
 from datetime import datetime
+from typing import Tuple
 
 from envs import SheepFlockEnv
 from onpolicy.algorithms.ppo_actor_critic import PPOActorCritic
@@ -16,39 +18,73 @@ from onpolicy.utils.reward_normalizer import RunningMeanStd
 
 
 class SimpleLogger:
-    """增强版训练日志记录器，支持多指标记录和JSON格式导出"""
-    def __init__(self, save_folder):
+    """增强版训练日志记录器，支持多指标记录和JSON格式导出；可选 TensorBoard。"""
+    def __init__(self, save_folder, use_tensorboard: bool = False):
         self.save_folder = save_folder
         os.makedirs(save_folder, exist_ok=True)
         self.log_file = open(os.path.join(save_folder, 'training_log.txt'), 'w')
         self.json_log_file = open(os.path.join(save_folder, 'training_metrics.json'), 'w')
         self.metrics_history = []
-        
-    def log(self, metrics):
-        parts = []
-        for k, v in metrics.items():
-            if isinstance(v, float):
-                parts.append(f'{k}: {v:.6f}')
-            else:
-                parts.append(f'{k}: {v}')
-        msg = ' | '.join(parts)
-        print(msg)
-        self.log_file.write(msg + '\n')
-        self.log_file.flush()
-        
-        # 保存到JSON历史记录
-        self.metrics_history.append(metrics)
-        
+        self.tb_writer = None
+        if use_tensorboard:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+                tb_dir = os.path.join(save_folder, 'tb')
+                self.tb_writer = SummaryWriter(log_dir=tb_dir)
+                print(f"TensorBoard log dir: {tb_dir}")
+            except ImportError:
+                print("未安装 tensorboard，跳过。安装: pip install tensorboard")
+                print("警告: 已传 --use_tensorboard 但无法创建 SummaryWriter，TensorBoard 将无曲线。")
+
+    def log(self, metrics, *, file_stdout: bool = True, tensorboard: bool = True):
+        """file_stdout: 打印并写入 training_log / JSON 历史；tensorboard: 写入事件文件（可更高频）。"""
+        if file_stdout:
+            parts = []
+            for k, v in metrics.items():
+                if k.startswith('reward/'):
+                    continue
+                if isinstance(v, float):
+                    parts.append(f'{k}: {v:.6f}')
+                else:
+                    parts.append(f'{k}: {v}')
+            msg = ' | '.join(parts)
+            print(msg)
+            self.log_file.write(msg + '\n')
+            self.log_file.flush()
+            self.metrics_history.append(metrics)
+
+        if tensorboard and self.tb_writer is not None:
+            step = int(np.asarray(metrics.get('total_steps', 0)).item())
+            for k, v in metrics.items():
+                if k == 'success_rate' and isinstance(v, str):
+                    s = v.strip().rstrip('%')
+                    try:
+                        self.tb_writer.add_scalar('train/success_rate', float(s) / 100.0, step)
+                    except ValueError:
+                        pass
+                    continue
+                try:
+                    if isinstance(v, (bool, np.bool_)):
+                        continue
+                    fv = float(np.asarray(v).item())
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                tag = k if k.startswith('reward/') else f'train/{k}'
+                self.tb_writer.add_scalar(tag, fv, step)
+            self.tb_writer.flush()
+
     def save_json(self):
         """保存完整的训练历史到JSON文件"""
         import json
         with open(os.path.join(self.save_folder, 'training_metrics.json'), 'w') as f:
             json.dump(self.metrics_history, f, indent=2)
-        
+
     def close(self):
         self.save_json()
         self.log_file.close()
         self.json_log_file.close()
+        if self.tb_writer is not None:
+            self.tb_writer.close()
 
 
 def parse_args():
@@ -68,6 +104,18 @@ def parse_args():
                         help='Use randomized environment for generalization training')
     parser.add_argument('--start_stage', type=int, default=0,
                         help='Starting stage for curriculum learning')
+    parser.add_argument(
+        '--herder_teleport',
+        action='store_true',
+        default=False,
+        help='机械狗每步直接置于编队目标点，关闭运动学（先验队形效果；后续可再训低层运动）',
+    )
+    parser.add_argument(
+        '--end_episode_when_at_target',
+        action='store_true',
+        default=False,
+        help='羊群质心距目标 < 阈值时立刻结束 episode（旧行为）；默认关闭，跑满 episode_length 以学习滞留控制',
+    )
 
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--num_env_steps', type=int, default=1000000)
@@ -135,6 +183,18 @@ def parse_args():
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--wandb_project', type=str, default='sheep_herding')
+    parser.add_argument(
+        '--use_tensorboard',
+        action='store_true',
+        default=False,
+        help='写入 TensorBoard 事件到 run 目录下的 tb/，便于边训边看曲线',
+    )
+    parser.add_argument(
+        '--tensorboard_log_interval',
+        type=int,
+        default=1,
+        help='每 N 个 PPO macro 写一次 TensorBoard（默认 1=每个 macro 一个点）；不影响 log_interval',
+    )
 
     parser.add_argument('--algorithm_name', type=str, default='ppo')
     parser.add_argument('--experiment_name', type=str, default='')
@@ -144,18 +204,26 @@ def parse_args():
     return args
 
 
-def make_train_env(args):
+def make_train_env(args, seed_offset: int = 0):
+    """Create one env instance; seed_offset makes parallel envs use different RNG streams."""
+    rs = None if args.seed is None else int(args.seed) + int(seed_offset)
+    use_herder_kinematics = not args.herder_teleport
+    end_on_target = args.end_episode_when_at_target
     if args.use_curriculum:
         from envs import CurriculumSheepFlockEnv
         env = CurriculumSheepFlockEnv(
             start_stage=args.start_stage,
-            random_seed=args.seed,
+            random_seed=rs,
+            use_herder_kinematics=use_herder_kinematics,
+            end_episode_when_at_target=end_on_target,
         )
     elif args.use_randomized:
         from envs import RandomizedSheepFlockEnv
         env = RandomizedSheepFlockEnv(
             episode_length=args.episode_length,
-            random_seed=args.seed,
+            random_seed=rs,
+            use_herder_kinematics=use_herder_kinematics,
+            end_episode_when_at_target=end_on_target,
         )
     else:
         from envs import SheepFlockEnv
@@ -164,7 +232,9 @@ def make_train_env(args):
             num_sheep=args.num_sheep,
             num_herders=args.num_herders,
             episode_length=args.episode_length,
-            random_seed=args.seed,
+            random_seed=rs,
+            use_herder_kinematics=use_herder_kinematics,
+            end_episode_when_at_target=end_on_target,
         )
     return env
 
@@ -185,7 +255,9 @@ class PPOTrainer:
 
         set_seed(args.seed)
 
-        self.env = make_train_env(args)
+        n_threads = args.n_rollout_threads
+        self.envs = [make_train_env(args, seed_offset=i) for i in range(n_threads)]
+        self.env = self.envs[0]
         self.num_herders = args.num_herders
 
         # Create policy based on selected architecture
@@ -263,17 +335,51 @@ class PPOTrainer:
         self.save_dir = os.path.join(run_dir, 'models')
         os.makedirs(self.save_dir, exist_ok=True)
 
-        self.logger = SimpleLogger(run_dir)
+        self.logger = SimpleLogger(run_dir, use_tensorboard=args.use_tensorboard)
 
         self.total_num_steps = 0
         self.episode = 0
 
-    def warmup(self):
-        obs = self.env.reset()
-        n_rollout_threads = self.args.n_rollout_threads
+    def _reset_all_envs(self) -> np.ndarray:
+        return np.stack([e.reset() for e in self.envs], axis=0)
 
-        obs_batch = np.tile(obs[np.newaxis, :], (n_rollout_threads, 1))
-        self.buffer.obs[0] = obs_batch.copy()
+    def _expand_actions_for_herders(self, action: np.ndarray, num_herders: int) -> np.ndarray:
+        a = np.asarray(action, dtype=np.float32).reshape(-1)
+        actions = np.zeros((num_herders, a.shape[0]), dtype=np.float32)
+        for i in range(num_herders):
+            actions[i] = a.copy()
+        return actions
+
+    def _step_all_envs(
+        self,
+        actions: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list]:
+        """
+        Step each env with its own action. On done, curriculum hooks + reset.
+        Returns stacked obs (N, obs_dim), rewards (N, 1), dones (N,), infos list.
+        """
+        n = self.args.n_rollout_threads
+        obs_list: list = []
+        rewards = np.zeros((n, 1), dtype=np.float32)
+        dones = np.zeros((n,), dtype=bool)
+        infos: list = []
+
+        for i, env in enumerate(self.envs):
+            expanded = self._expand_actions_for_herders(actions[i], env.num_herders)
+            o, r, d, info = env.step(expanded)
+            if d:
+                if hasattr(env, 'episode_end'):
+                    succ = False
+                    if isinstance(info, dict):
+                        succ = bool(info.get('is_success', False))
+                    env.episode_end(succ)
+                o = env.reset()
+            obs_list.append(np.asarray(o, dtype=np.float32).reshape(-1))
+            rewards[i, 0] = float(r)
+            dones[i] = bool(d)
+            infos.append(info)
+
+        return np.stack(obs_list, axis=0), rewards, dones, infos
 
     def collect(self, step):
         self.policy.eval()
@@ -326,7 +432,9 @@ class PPOTrainer:
             dtype=np.float32,
         )
 
-        obs_batch = np.tile(obs[np.newaxis, :], (n_rollout_threads, 1))
+        obs_batch = np.asarray(obs, dtype=np.float32)
+        if obs_batch.ndim == 1:
+            obs_batch = np.tile(obs_batch[np.newaxis, :], (n_rollout_threads, 1))
 
         if isinstance(rewards, (int, float)):
             rewards_batch = np.array([rewards] * n_rollout_threads).reshape(n_rollout_threads, 1)
@@ -509,36 +617,53 @@ class PPOTrainer:
             self.save_dir, f'model_{self.total_num_steps}.pt'))
 
     def run(self):
-        self.warmup()
+        n_threads = self.args.n_rollout_threads
+        ep_len = self.args.episode_length
+        steps_per_rollout = ep_len * n_threads
+        macro_episodes = max(1, int(self.args.num_env_steps) // steps_per_rollout)
 
-        episodes = int(self.args.num_env_steps) // self.args.episode_length
-
-        for episode in range(episodes):
+        for episode in range(macro_episodes):
             if self.args.use_linear_lr_decay:
-                self.adjust_lr(episode, episodes)
-            self.adjust_entropy_coef(episode, episodes)
-            self.adjust_clip_param(episode, episodes)
+                self.adjust_lr(episode, macro_episodes)
+            self.adjust_entropy_coef(episode, macro_episodes)
+            self.adjust_clip_param(episode, macro_episodes)
 
-            obs = self.env.reset()
+            self.buffer.obs[0] = self._reset_all_envs().copy()
+            self.buffer.step = 0
 
             rnn_states = np.zeros(
-                (self.args.n_rollout_threads, self.args.recurrent_N, self.args.hidden_size),
+                (n_threads, self.args.recurrent_N, self.args.hidden_size),
                 dtype=np.float32
             )
             rnn_states_critic = np.zeros(
-                (self.args.n_rollout_threads, self.args.recurrent_N, self.args.hidden_size),
+                (n_threads, self.args.recurrent_N, self.args.hidden_size),
                 dtype=np.float32
             )
-            masks = np.ones((self.args.n_rollout_threads, 1), dtype=np.float32)
+            masks = np.ones((n_threads, 1), dtype=np.float32)
 
-            for step in range(self.args.episode_length):
+            last_dones = np.zeros((n_threads,), dtype=bool)
+            last_infos: list = []
+            reward_comp_sums = defaultdict(float)
+            reward_comp_n = 0
+
+            for step in range(ep_len):
                 values, actions, action_log_probs, new_rnn_states, new_rnn_states_critic = \
                     self.collect(step)
 
-                actions_env = actions[0]
-                obs, rewards, dones, infos = self.env.step(
-                    self._expand_actions_for_herders(actions_env)
-                )
+                obs, rewards, dones, infos = self._step_all_envs(actions)
+
+                for info in infos:
+                    if not isinstance(info, dict):
+                        continue
+                    rc = info.get('reward_components')
+                    if not rc:
+                        continue
+                    for name, val in rc.items():
+                        try:
+                            reward_comp_sums[name] += float(val)
+                        except (TypeError, ValueError):
+                            pass
+                    reward_comp_n += 1
 
                 data = (
                     obs, rewards, dones, infos, values, actions,
@@ -546,7 +671,15 @@ class PPOTrainer:
                 )
                 self.insert(data)
 
-                self.total_num_steps += 1
+                self.total_num_steps += n_threads
+                last_dones = dones
+                last_infos = infos
+
+            for i, env in enumerate(self.envs):
+                if hasattr(env, 'episode_end') and not last_dones[i]:
+                    info = last_infos[i] if i < len(last_infos) else {}
+                    succ = bool(info.get('is_success', False)) if isinstance(info, dict) else False
+                    env.episode_end(succ)
 
             self.compute_returns()
             train_metrics = self.train()
@@ -556,45 +689,55 @@ class PPOTrainer:
 
             self.episode = episode
 
-            success = infos.get('is_success', False) if isinstance(infos, dict) else False
-            
-            if hasattr(self.env, 'episode_end'):
-                self.env.episode_end(success)
+            avg_reward = np.mean(self.buffer.rewards) * self.args.episode_length
+            current_lr = self.optimizer.param_groups[0]['lr']
 
-            if episode % self.args.log_interval == 0:
-                avg_reward = np.mean(self.buffer.rewards) * self.args.episode_length
-                current_lr = self.optimizer.param_groups[0]['lr']
-                
-                log_data = {
-                    'episode': episode,
-                    'total_steps': self.total_num_steps,
-                    'avg_reward': avg_reward,
-                    'train_loss': train_metrics['total_loss'],
-                    'value_loss': train_metrics['value_loss'],
-                    'policy_loss': train_metrics['policy_loss'],
-                    'entropy': train_metrics['entropy'],
-                    'grad_norm': train_metrics['grad_norm'],
-                    'lr': current_lr,
-                    'entropy_coef': self.entropy_coef,
-                    'clip_param': self.clip_param,
-                }
-                
-                if self.use_kl_penalty:
-                    log_data['kl_divergence'] = self.kl_divergence
-                    log_data['kl_coef'] = self.kl_coef
-                
-                if self.use_adaptive_gae:
-                    log_data['gae_lambda'] = self.gae_lambda
-                    log_data['value_pred_error'] = self.value_pred_error
-                else:
-                    log_data['gae_lambda'] = self.gae_lambda
-                
-                if hasattr(self.env, 'get_curriculum_info'):
-                    curriculum_info = self.env.get_curriculum_info()
-                    log_data['stage'] = curriculum_info['current_stage']
-                    log_data['success_rate'] = f"{curriculum_info['success_rate']:.2%}"
-                
-                self.logger.log(log_data)
+            log_data = {
+                'episode': episode,
+                'total_steps': self.total_num_steps,
+                'avg_reward': avg_reward,
+                'train_loss': train_metrics['total_loss'],
+                'value_loss': train_metrics['value_loss'],
+                'policy_loss': train_metrics['policy_loss'],
+                'entropy': train_metrics['entropy'],
+                'grad_norm': train_metrics['grad_norm'],
+                'lr': current_lr,
+                'entropy_coef': self.entropy_coef,
+                'clip_param': self.clip_param,
+            }
+
+            if self.use_kl_penalty:
+                log_data['kl_divergence'] = self.kl_divergence
+                log_data['kl_coef'] = self.kl_coef
+
+            if self.use_adaptive_gae:
+                log_data['gae_lambda'] = self.gae_lambda
+                log_data['value_pred_error'] = self.value_pred_error
+            else:
+                log_data['gae_lambda'] = self.gae_lambda
+
+            if hasattr(self.env, 'get_curriculum_info'):
+                curriculum_info = self.env.get_curriculum_info()
+                log_data['stage'] = curriculum_info['current_stage']
+                log_data['success_rate'] = f"{curriculum_info['success_rate']:.2%}"
+
+            if reward_comp_n > 0:
+                for name, s in reward_comp_sums.items():
+                    log_data[f'reward/{name}'] = s / reward_comp_n
+
+            tb_step = (
+                self.args.use_tensorboard
+                and self.logger.tb_writer is not None
+                and episode % self.args.tensorboard_log_interval == 0
+            )
+            file_step = episode % self.args.log_interval == 0
+
+            if file_step and tb_step:
+                self.logger.log(log_data, file_stdout=True, tensorboard=True)
+            elif file_step:
+                self.logger.log(log_data, file_stdout=True, tensorboard=False)
+            elif tb_step:
+                self.logger.log(log_data, file_stdout=False, tensorboard=True)
 
             if episode % self.args.save_interval == 0:
                 self.save()
@@ -603,15 +746,9 @@ class PPOTrainer:
         print("Training completed!")
         self.logger.close()
 
-    def _expand_actions_for_herders(self, action):
-        actions = np.zeros((self.num_herders, len(action)), dtype=np.float32)
-        for i in range(self.num_herders):
-            actions[i] = action.copy()
-        return actions
-
     def adjust_lr(self, episode, episodes):
         """Adjust learning rate with warmup and decay."""
-        total_steps = episode * self.args.episode_length
+        total_steps = episode * self.args.episode_length * self.args.n_rollout_threads
         
         # Warmup phase
         if total_steps < self.args.lr_warmup_steps:

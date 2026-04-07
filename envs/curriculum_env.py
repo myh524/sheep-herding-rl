@@ -8,6 +8,7 @@ from typing import Tuple, Dict, Any, Optional, List
 from gym import spaces
 
 from envs.sheep_flock import SheepFlockEnv
+from envs.sheep_scenario import sample_random_target_position
 from envs.high_level_action import HighLevelAction
 
 
@@ -56,28 +57,28 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
     DEFAULT_STAGES = [
         CurriculumStage(
             name='Stage 0: Simple',
-            num_sheep=3,
+            num_sheep=1,
             num_herders=3,
-            world_size=(60.0, 60.0),
-            episode_length=80,
+            world_size=(70.0, 70.0),
+            episode_length=200,
             target_success_rate=0.8,
             min_episodes=50,
         ),
         CurriculumStage(
             name='Stage 1: Medium',
-            num_sheep=5,
+            num_sheep=3,
             num_herders=3,
-            world_size=(60.0, 60.0),
-            episode_length=100,
+            world_size=(70.0, 70.0),
+            episode_length=225,
             target_success_rate=0.7,
             min_episodes=100,
         ),
         CurriculumStage(
             name='Stage 2: Target',
-            num_sheep=10,
+            num_sheep=6,
             num_herders=3,
-            world_size=(60.0, 60.0),
-            episode_length=150,
+            world_size=(70.0, 70.0),
+            episode_length=250,
             target_success_rate=0.6,
             min_episodes=200,
         ),
@@ -90,6 +91,8 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         dt: float = 0.1,
         random_seed: Optional[int] = None,
         auto_advance: bool = True,
+        use_herder_kinematics: bool = True,
+        end_episode_when_at_target: bool = False,
     ):
         """
         Initialize curriculum learning environment
@@ -100,6 +103,8 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             dt: Time step
             random_seed: Random seed
             auto_advance: Whether to automatically advance to next stage
+            use_herder_kinematics: 与 SheepFlockEnv 相同；阶段切换时保留该设置
+            end_episode_when_at_target: 与 SheepFlockEnv 相同
         """
         self.stages = stages if stages is not None else self.DEFAULT_STAGES
         self.current_stage_idx = start_stage
@@ -117,6 +122,8 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             episode_length=current_stage.episode_length,
             dt=dt,
             random_seed=random_seed,
+            use_herder_kinematics=use_herder_kinematics,
+            end_episode_when_at_target=end_episode_when_at_target,
         )
     
     def _get_current_stage(self) -> CurriculumStage:
@@ -131,25 +138,12 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             np.random.seed(self._seed)
             self._seed = None
         
-        target_pos = np.array([
-            self.world_size[0] * np.random.uniform(0.6, 0.9),
-            self.world_size[1] * np.random.uniform(0.3, 0.7)
-        ])
+        target_pos = sample_random_target_position(self.world_size)
         
         self.scenario.reset(target_position=target_pos)
         self.prev_distance = self.scenario.get_distance_to_target()
         
         return self._get_obs()
-    
-    def _check_done(self) -> bool:
-        """Check if episode is done"""
-        if self.scenario.is_flock_at_target():
-            return True
-        
-        if self.current_step >= self.episode_length:
-            return True
-        
-        return False
     
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info"""
@@ -214,6 +208,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             world_size=new_stage.world_size,
             num_sheep=new_stage.num_sheep,
             num_herders=new_stage.num_herders,
+            use_herder_kinematics=self.scenario.use_herder_kinematics,
         )
         
         self.action_decoder = HighLevelAction(
@@ -254,6 +249,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
                 world_size=new_stage.world_size,
                 num_sheep=new_stage.num_sheep,
                 num_herders=new_stage.num_herders,
+                use_herder_kinematics=self.scenario.use_herder_kinematics,
             )
             
             self.action_decoder = HighLevelAction(
@@ -304,6 +300,8 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
         episode_length: int = 100,
         dt: float = 0.1,
         random_seed: Optional[int] = None,
+        use_herder_kinematics: bool = True,
+        end_episode_when_at_target: bool = False,
     ):
         """
         初始化随机化环境
@@ -316,6 +314,8 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             episode_length: 每个episode的最大步数
             dt: 时间步长
             random_seed: 随机种子
+            use_herder_kinematics: 与 SheepFlockEnv 相同
+            end_episode_when_at_target: 与 SheepFlockEnv 相同
         """
         self.num_sheep_range = num_sheep_range
         self.num_herders_range = num_herders_range
@@ -338,6 +338,8 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             episode_length=episode_length,
             dt=dt,
             random_seed=random_seed,
+            use_herder_kinematics=use_herder_kinematics,
+            end_episode_when_at_target=end_episode_when_at_target,
         )
     
     def reset(self) -> np.ndarray:
@@ -379,6 +381,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
                 'perception_radius': 5.0,
                 'separation_radius': 2.0,
             },
+            use_herder_kinematics=self.scenario.use_herder_kinematics,
         )
         
         self.action_decoder = HighLevelAction(
@@ -389,10 +392,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
         
         self._setup_spaces()
         
-        target_pos = np.array([
-            self.world_size[0] * self._rng.uniform(0.7, 0.9),
-            self.world_size[1] * self._rng.uniform(0.3, 0.7)
-        ])
+        target_pos = sample_random_target_position(self.world_size, rng=self._rng)
         
         self.scenario.reset(target_position=target_pos)
         self.prev_distance = self.scenario.get_distance_to_target()

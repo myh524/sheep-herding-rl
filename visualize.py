@@ -1,16 +1,134 @@
 """
 模型可视化运行脚本
-加载训练好的模型并实时渲染环境
+加载训练好的模型并实时渲染环境。
+
+Linux / SSH 无 DISPLAY 时默认使用 Agg 后端（不弹窗），用 time.sleep 代替 plt.pause；
+本地桌面请安装 python3-tk（TkAgg）或 PyQt5（Qt5Agg）并设置 DISPLAY；也可设置 MPLBACKEND。
 """
 
 import argparse
 import os
-import torch
+import sys
+import time
+import warnings
+
+import importlib
 import numpy as np
+import torch
+
+
+def _gui_deps_available(backend: str) -> bool:
+    """matplotlib.use 成功不等于能弹窗；例如未装 python3-tk 时 TkAgg 会在首帧才崩。"""
+    b = backend.lower()
+    if b == "agg":
+        return True
+    if b == "tkagg":
+        try:
+            import tkinter  # noqa: F401
+        except ImportError:
+            return False
+        return True
+    if b == "qt5agg":
+        try:
+            importlib.import_module("matplotlib.backends.backend_qt5agg")
+        except Exception:
+            return False
+        return True
+    if b == "qtagg":
+        try:
+            importlib.import_module("matplotlib.backends.backend_qtagg")
+        except Exception:
+            return False
+        return True
+    if b == "gtk3agg":
+        try:
+            importlib.import_module("matplotlib.backends.backend_gtk3agg")
+        except Exception:
+            return False
+        return True
+    return True
+
+
+def _configure_matplotlib_backend(force_headless: bool) -> str:
+    """必须在 import matplotlib.pyplot 之前调用。"""
+    import matplotlib
+
+    if force_headless:
+        matplotlib.use("Agg", force=True)
+        return "Agg"
+
+    env_backend = os.environ.get("MPLBACKEND")
+    if env_backend:
+        try:
+            matplotlib.use(env_backend, force=True)
+            if env_backend.lower() != "agg" and not _gui_deps_available(env_backend):
+                raise ImportError(f"backend {env_backend} dependencies missing")
+            return env_backend
+        except Exception:
+            print(
+                f"警告: MPLBACKEND={env_backend} 不可用（例如 TkAgg 需安装 python3-tk），"
+                "已回退到 Agg。要弹窗请: sudo apt install python3-tk 或安装 PyQt5 后使用 Qt5Agg。",
+                file=sys.stderr,
+            )
+            matplotlib.use("Agg", force=True)
+            return "Agg"
+
+    has_display = bool(
+        os.environ.get("DISPLAY")
+        or os.environ.get("WAYLAND_DISPLAY")
+    )
+    if not has_display:
+        matplotlib.use("Agg", force=True)
+        return "Agg"
+
+    for name in ("TkAgg", "Qt5Agg", "QtAgg", "GTK3Agg"):
+        try:
+            matplotlib.use(name, force=True)
+            if not _gui_deps_available(name):
+                continue
+            return name
+        except Exception:
+            continue
+
+    matplotlib.use("Agg", force=True)
+    return "Agg"
+
+
+def _parse_early_args():
+    """仅解析 --force_headless，以便在导入 pyplot 前选后端。"""
+    fh = False
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == "--force_headless":
+            fh = True
+            break
+        if sys.argv[i].startswith("--force_headless="):
+            fh = sys.argv[i].split("=", 1)[1].lower() in ("1", "true", "yes")
+            break
+        i += 1
+    return fh
+
+
+_FORCE_HEADLESS = _parse_early_args()
+_MATPLOTLIB_BACKEND = _configure_matplotlib_backend(_FORCE_HEADLESS)
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.widgets import Button
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
+
+if _MATPLOTLIB_BACKEND.lower() == "agg":
+    warnings.filterwarnings(
+        "ignore",
+        message="FigureCanvasAgg is non-interactive",
+        category=UserWarning,
+    )
+
+
+def _matplotlib_is_interactive() -> bool:
+    return plt.get_backend().lower() != "agg"
+
+
 from dataclasses import dataclass
 
 from envs import SheepFlockEnv
@@ -41,9 +159,15 @@ def parse_args():
     
     parser.add_argument('--num_sheep', type=int, default=10)
     parser.add_argument('--num_herders', type=int, default=3)
-    parser.add_argument('--world_size', type=float, nargs=2, default=[50.0, 50.0])
+    parser.add_argument('--world_size', type=float, nargs=2, default=[100.0, 100.0])
     parser.add_argument('--episode_length', type=int, default=150)
     parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument(
+        '--herder_teleport',
+        action='store_true',
+        default=False,
+        help='机械狗直接瞬移到编队目标（关闭运动学），与 train_ppo --herder_teleport 一致',
+    )
     
     parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--layer_N', type=int, default=3)
@@ -61,7 +185,18 @@ def parse_args():
     
     parser.add_argument('--save_gif', type=str, default=None)
     parser.add_argument('--save_video', type=str, default=None)
-    
+    parser.add_argument(
+        '--force_headless',
+        action='store_true',
+        help='强制使用无窗口 Agg 后端（需在命令中放在靠前位置以便生效，或设置 MPLBACKEND=Agg）',
+    )
+    parser.add_argument(
+        '--headless_progress_interval',
+        type=int,
+        default=30,
+        help='无图形窗口时每 N 步打印一行进度；设为 0 关闭',
+    )
+
     return parser.parse_args()
 
 
@@ -190,19 +325,23 @@ class Visualizer:
         self.current_obs = None
         
         self.is_improved = isinstance(policy, ImprovedActorCritic)
-        
+        self._interactive = _matplotlib_is_interactive()
+        self._gui_shown = False
+
     def setup_figure(self):
         self.fig, self.ax = plt.subplots(figsize=(10, 10))
         self.ax.set_xlim(0, self.env.world_size[0])
         self.ax.set_ylim(0, self.env.world_size[1])
         self.ax.set_aspect('equal')
         self.ax.set_facecolor('#f5f5f5')
-        
-        ax_pause = plt.axes([0.85, 0.01, 0.12, 0.04])
-        self.btn_pause = Button(ax_pause, 'Pause/Resume')
-        self.btn_pause.on_clicked(self.toggle_pause)
-        
-        self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
+
+        if self._interactive:
+            ax_pause = plt.axes([0.85, 0.01, 0.12, 0.04])
+            self.btn_pause = Button(ax_pause, 'Pause/Resume')
+            self.btn_pause.on_clicked(self.toggle_pause)
+            self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
+        else:
+            self.btn_pause = None
         
     def toggle_pause(self, event):
         self.paused = not self.paused
@@ -383,33 +522,52 @@ class Visualizer:
         
         for step in range(self.env.episode_length):
             while self.paused:
-                plt.pause(0.1)
-            
+                if self._interactive:
+                    plt.pause(0.1)
+                else:
+                    time.sleep(0.1)
+
             action = self.get_action(self.current_obs)
-            
+
             actions_env = np.zeros((self.env.num_herders, len(action)), dtype=np.float32)
             for i in range(self.env.num_herders):
                 actions_env[i] = action.copy()
-            
+
             obs, reward, done, info = self.env.step(actions_env)
-            
+
             self.state.current_step += 1
             self.state.total_reward += reward
             self.state.action_history.append(action.copy())
-            
+
             self.render_env()
-            
+
+            if self._interactive and not self._gui_shown:
+                plt.show(block=False)
+                self._gui_shown = True
+
             if self.args.save_gif or self.args.save_video:
                 self.fig.canvas.draw()
                 self.frames.append(np.array(self.fig.canvas.renderer.buffer_rgba()))
-            
-            plt.pause(self.args.render_delay / 1000.0)
-            
+
+            delay_s = self.args.render_delay / 1000.0
+            if self._interactive:
+                plt.pause(delay_s)
+            else:
+                time.sleep(delay_s)
+                iv = self.args.headless_progress_interval
+                if iv > 0 and self.state.current_step % iv == 0:
+                    print(
+                        f"  step {self.state.current_step}/{self.env.episode_length}",
+                        flush=True,
+                    )
+
             self.current_obs = obs
-            
+
+            if isinstance(info, dict):
+                self.state.success = bool(info.get('is_success', False))
             if done:
                 break
-        
+
         print(f"\nEpisode {episode_num} finished:")
         print(f"  Steps: {self.state.current_step}, Reward: {self.state.total_reward:.3f}")
         print(f"  Result: {'SUCCESS!' if self.state.success else 'FAILED'}")
@@ -458,10 +616,17 @@ class Visualizer:
 
 def main():
     args = parse_args()
-    
+
     print(f"Model: {args.model_path}")
     print(f"Config: {args.num_sheep} sheep, {args.num_herders} herders, world {args.world_size}")
-    
+    mode = "interactive" if _matplotlib_is_interactive() else "headless (无弹窗)"
+    print(f"Matplotlib backend: {_MATPLOTLIB_BACKEND} ({mode})")
+    if not _matplotlib_is_interactive():
+        print(
+            "提示: 无窗口运行可加 --save_gif out.gif；要弹窗请先 sudo apt install python3-tk "
+            "（或安装 PyQt5），再在有 DISPLAY 的会话中运行。",
+        )
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
@@ -471,6 +636,7 @@ def main():
         num_herders=args.num_herders,
         episode_length=args.episode_length,
         random_seed=args.seed,
+        use_herder_kinematics=not args.herder_teleport,
     )
     
     policy, args = load_model(args.model_path, env, device, args)

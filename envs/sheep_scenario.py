@@ -8,6 +8,36 @@ from typing import List, Tuple, Optional, Dict, Any
 from envs.sheep_entity import SheepEntity
 
 
+def sample_random_target_position(
+    world_size: Tuple[float, float],
+    margin: float = 1.0,
+    rng: Optional[Any] = None,
+) -> np.ndarray:
+    """
+    在世界矩形内均匀随机采样目标点（与各轴独立均匀分布）。
+
+    Args:
+        world_size: (width, height)
+        margin: 距边界的内缩距离，与羊群初始位置裁剪一致（默认 1.0）
+        rng: 可选，np.random.RandomState 等；为 None 时使用全局 np.random
+    """
+    w, h = float(world_size[0]), float(world_size[1])
+    m = float(margin)
+    x_lo, x_hi = m, w - m
+    y_lo, y_hi = m, h - m
+    if x_lo > x_hi:
+        x_lo = x_hi = w * 0.5
+    if y_lo > y_hi:
+        y_lo = y_hi = h * 0.5
+
+    def _uniform(low: float, high: float) -> float:
+        if rng is not None:
+            return float(rng.uniform(low, high))
+        return float(np.random.uniform(low, high))
+
+    return np.array([_uniform(x_lo, x_hi), _uniform(y_lo, y_hi)], dtype=np.float32)
+
+
 class SheepScenario:
     """
     场景管理类
@@ -27,6 +57,7 @@ class SheepScenario:
         target_position: Optional[np.ndarray] = None,
         sheep_config: Optional[Dict[str, Any]] = None,
         random_seed: Optional[int] = None,
+        use_herder_kinematics: bool = True,
     ):
         """
         初始化场景
@@ -35,13 +66,15 @@ class SheepScenario:
             world_size: 世界大小 (width, height)
             num_sheep: 羊的数量
             num_herders: 机械狗数量
-            target_position: 目标位置，如果为None则随机生成
+            target_position: 目标位置，如果为 None 则在合法矩形内均匀随机
             sheep_config: 羊的配置参数
             random_seed: 随机种子
+            use_herder_kinematics: False 时机械狗每步直接置于编队目标点（无运动学），便于调试高层队形
         """
         if random_seed is not None:
             np.random.seed(random_seed)
         
+        self.use_herder_kinematics = use_herder_kinematics
         self.world_size = world_size
         self.num_sheep = num_sheep
         self.num_herders = num_herders
@@ -107,10 +140,7 @@ class SheepScenario:
     def _init_target(self):
         """初始化目标位置"""
         if self.target_position is None:
-            self.target_position = np.array([
-                self.world_size[0] * 0.85,
-                self.world_size[1] * 0.5
-            ], dtype=np.float32)
+            self.target_position = sample_random_target_position(self.world_size)
         else:
             self.target_position = np.array(self.target_position, dtype=np.float32)
     
@@ -157,6 +187,15 @@ class SheepScenario:
             dt: 时间步长
         """
         if not (hasattr(self, 'herder_targets') and self.herder_targets is not None):
+            return
+        
+        if not self.use_herder_kinematics:
+            for i in range(self.num_herders):
+                self.herder_positions[i] = np.clip(
+                    self.herder_targets[i],
+                    [0.0, 0.0],
+                    [self.world_size[0], self.world_size[1]],
+                ).astype(np.float32)
             return
         
         flock_center = self.get_flock_center()
@@ -514,5 +553,6 @@ class SheepScenario:
             f"world_size={self.world_size}, "
             f"num_sheep={self.num_sheep}, "
             f"num_herders={self.num_herders}, "
+            f"use_herder_kinematics={self.use_herder_kinematics}, "
             f"target={self.target_position})"
         )

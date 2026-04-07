@@ -66,6 +66,12 @@ def parse_args():
     parser.add_argument('--world_size', type=float, nargs=2, default=[50.0, 50.0])
     parser.add_argument('--episode_length', type=int, default=100)
     parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument(
+        '--herder_teleport',
+        action='store_true',
+        default=False,
+        help='机械狗直接瞬移到编队目标（关闭运动学）',
+    )
     
     parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--layer_N', type=int, default=3)
@@ -427,6 +433,7 @@ def main():
         num_herders=args.num_herders,
         episode_length=args.episode_length,
         random_seed=args.seed,
+        use_herder_kinematics=not args.herder_teleport,
     )
     
     policy, args = load_model(args.model_path, env, device, args)
