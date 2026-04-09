@@ -15,7 +15,7 @@ python train_ppo.py \
     --scenario_name fast_train \
     --num_sheep 6 \
     --num_herders 3 \
-    --world_size 30.0 30.0 \
+    --world_size 100.0 100.0 \
     --episode_length 100 \
     --seed 1 \
     --num_env_steps 500000 \

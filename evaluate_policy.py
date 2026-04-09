@@ -63,7 +63,13 @@ def parse_args():
     
     parser.add_argument('--num_sheep', type=int, default=10)
     parser.add_argument('--num_herders', type=int, default=3)
-    parser.add_argument('--world_size', type=float, nargs=2, default=[50.0, 50.0])
+    parser.add_argument(
+        '--world_size',
+        type=float,
+        nargs=2,
+        default=[100.0, 100.0],
+        help='场地 (W,H)：圆形半径 R=min(W,H)/2，目标在圆心 (0,0)',
+    )
     parser.add_argument('--episode_length', type=int, default=100)
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument(
@@ -72,7 +78,26 @@ def parse_args():
         default=False,
         help='机械狗直接瞬移到编队目标（关闭运动学）',
     )
-    
+    parser.add_argument(
+        '--formation_delta',
+        action='store_true',
+        default=False,
+        help='与 train_ppo --formation_delta 一致',
+    )
+    parser.add_argument(
+        '--formation_delta_theta_max_deg',
+        type=float,
+        default=22.5,
+    )
+    parser.add_argument('--formation_delta_radius_max', type=float, default=3.0)
+    parser.add_argument('--formation_delta_coverage_max', type=float, default=0.15)
+    parser.add_argument(
+        '--high_level_interval',
+        type=int,
+        default=None,
+        help='与 train_ppo 一致',
+    )
+
     parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--layer_N', type=int, default=3)
     parser.add_argument('--use_ReLU', action='store_true', default=True)
@@ -427,6 +452,20 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
     
+    extra_kw = {}
+    if getattr(args, "formation_delta", False):
+        extra_kw.update(
+            {
+                "formation_delta_mode": True,
+                "formation_delta_theta_max_rad": float(
+                    np.deg2rad(float(args.formation_delta_theta_max_deg))
+                ),
+                "formation_delta_radius_max": float(args.formation_delta_radius_max),
+                "formation_delta_coverage_max": float(args.formation_delta_coverage_max),
+            }
+        )
+    if getattr(args, "high_level_interval", None) is not None:
+        extra_kw["high_level_interval"] = int(args.high_level_interval)
     env = SheepFlockEnv(
         world_size=tuple(args.world_size),
         num_sheep=args.num_sheep,
@@ -434,6 +473,7 @@ def main():
         episode_length=args.episode_length,
         random_seed=args.seed,
         use_herder_kinematics=not args.herder_teleport,
+        **extra_kw,
     )
     
     policy, args = load_model(args.model_path, env, device, args)

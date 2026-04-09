@@ -416,11 +416,11 @@ class HighLevelAction:
         R_max: 最大站位半径
     
     Methods:
-        decode_action(raw_action, target_direction) -> Dict:
-            解码原始动作 [-1,1] 为实际参数
+        decode_action(raw_action, flock_center, world_size) -> Dict:
+            解码原始动作 [-1,1]（前 3 维有效）为 θ_in、θ_mid、R、coverage 等；θ_in=a[0]·π 为弧中点→羊质心方向
         
-        sample_herder_positions(num_herders, mu_r, sigma_r, mu_theta, kappa):
-            采样机械狗位置
+        sample_herder_positions(num_herders, flock_center, radius, coverage, theta_mid_rad):
+            在羊质心圆弧上采样机械狗位置
     """
 ```
 
@@ -434,7 +434,7 @@ class PPOActorCritic(nn.Module):
     PPO Actor-Critic网络
     
     Architecture:
-        obs (12D) -> MLP(256, 256, 256) -> Actor -> action (4D)
+        obs (12D) -> MLP(256, 256, 256) -> Actor -> action (5D)
                                           -> Critic -> value (1D)
     
     Methods:
@@ -458,7 +458,7 @@ class PPOActorCritic(nn.Module):
 │       │ step(action)              ↓                             │
 │       │                    ┌──────────┐                         │
 │       │                    │  策略    │ get_actions()           │
-│       │                    │ (Actor)  │ ──────────→ action (4D) │
+│       │                    │ (Actor)  │ ──────────→ action (5D) │
 │       │                    └──────────┘                         │
 │       │                           │                             │
 │       │                           ↓                             │
@@ -517,10 +517,15 @@ print(f"Obs range: [{obs.min():.3f}, {obs.max():.3f}]")
 ```python
 # 检查动作解码是否正确
 decoder = HighLevelAction()
+fc = np.array([0.0, 0.0], dtype=np.float32)
+world_size = (50.0, 50.0)
 for _ in range(10):
-    raw = np.random.uniform(-1, 1, 4)
-    decoded = decoder.decode_action(raw, target_direction=0)
-    print(f"raw: {raw} -> kappa: {decoded['kappa']:.2f}")
+    raw = np.random.uniform(-1, 1, 5)
+    decoded = decoder.decode_action(raw, fc, world_size)
+    print(
+        f"raw[0:3]: {raw[:3]} -> θ_in={decoded['theta_in_rad']:.2f} rad, "
+        f"R={decoded['radius']:.2f}, cov={decoded['coverage']:.2f}"
+    )
 ```
 
 #### 3. 监控奖励分布
@@ -1036,7 +1041,7 @@ surround | r=12.0 w=90 a=0.15
 │                                                             │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐              │
 │  │ 策略     │───→│ 动作     │───→│ 解码器   │              │
-│  │ 网络     │    │ (4D)     │    │          │              │
+│  │ 网络     │    │ (5D)     │    │          │              │
 │  └──────────┘    └──────────┘    └──────────┘              │
 │                                        │                    │
 │                                        ↓                    │

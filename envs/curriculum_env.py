@@ -57,28 +57,28 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
     DEFAULT_STAGES = [
         CurriculumStage(
             name='Stage 0: Simple',
-            num_sheep=1,
+            num_sheep=3,
             num_herders=3,
-            world_size=(70.0, 70.0),
+            world_size=(70.0,70.0),
             episode_length=200,
             target_success_rate=0.8,
             min_episodes=50,
         ),
         CurriculumStage(
             name='Stage 1: Medium',
-            num_sheep=3,
+            num_sheep=6,
             num_herders=3,
             world_size=(70.0, 70.0),
-            episode_length=225,
+            episode_length=200,
             target_success_rate=0.7,
             min_episodes=100,
         ),
         CurriculumStage(
             name='Stage 2: Target',
-            num_sheep=6,
+            num_sheep=10,
             num_herders=3,
-            world_size=(70.0, 70.0),
-            episode_length=250,
+            world_size=(100.0, 100.0),
+            episode_length=200,
             target_success_rate=0.6,
             min_episodes=200,
         ),
@@ -88,11 +88,17 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         self,
         stages: Optional[List[CurriculumStage]] = None,
         start_stage: int = 0,
-        dt: float = 0.1,
+        dt: float = 2.0,
         random_seed: Optional[int] = None,
         auto_advance: bool = True,
         use_herder_kinematics: bool = True,
         end_episode_when_at_target: bool = False,
+        info_include_flock_state: bool = False,
+        formation_delta_mode: bool = False,
+        formation_delta_theta_max_rad: float = np.pi / 8.0,
+        formation_delta_radius_max: float = 3.0,
+        formation_delta_coverage_max: float = 0.15,
+        high_level_interval: Optional[int] = None,
     ):
         """
         Initialize curriculum learning environment
@@ -105,6 +111,9 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             auto_advance: Whether to automatically advance to next stage
             use_herder_kinematics: 与 SheepFlockEnv 相同；阶段切换时保留该设置
             end_episode_when_at_target: 与 SheepFlockEnv 相同
+            info_include_flock_state: 与 SheepFlockEnv 相同
+            formation_delta_mode, formation_delta_*: 与 SheepFlockEnv 相同
+            high_level_interval: 与 SheepFlockEnv 相同
         """
         self.stages = stages if stages is not None else self.DEFAULT_STAGES
         self.current_stage_idx = start_stage
@@ -124,8 +133,14 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             random_seed=random_seed,
             use_herder_kinematics=use_herder_kinematics,
             end_episode_when_at_target=end_episode_when_at_target,
+            info_include_flock_state=info_include_flock_state,
+            formation_delta_mode=formation_delta_mode,
+            formation_delta_theta_max_rad=formation_delta_theta_max_rad,
+            formation_delta_radius_max=formation_delta_radius_max,
+            formation_delta_coverage_max=formation_delta_coverage_max,
+            high_level_interval=high_level_interval,
         )
-    
+
     def _get_current_stage(self) -> CurriculumStage:
         """Get current stage"""
         return self.stages[self.current_stage_idx]
@@ -141,10 +156,12 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         target_pos = sample_random_target_position(self.world_size)
         
         self.scenario.reset(target_position=target_pos)
-        self.prev_distance = self.scenario.get_distance_to_target()
-        
+        self._sync_prev_d_hat_after_reset()
+        self._reward_components = {}
+        self._reset_formation_integrator()
+
         return self._get_obs()
-    
+
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info"""
         info = super()._get_info()
@@ -211,16 +228,13 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             use_herder_kinematics=self.scenario.use_herder_kinematics,
         )
         
-        self.action_decoder = HighLevelAction(
-            R_ref=np.linalg.norm(new_stage.world_size) / 6.0,
-            R_min=1.0,
-            R_max=np.linalg.norm(new_stage.world_size) / 2.0,
-        )
+        self.action_decoder = HighLevelAction()
         
         self._setup_spaces()
-        
+        self._reset_formation_integrator()
+
         self.episode_history = []
-        
+
         print(f"Advanced to {new_stage.name}: "
               f"sheep={new_stage.num_sheep}, "
               f"herders={new_stage.num_herders}, "
@@ -252,15 +266,12 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
                 use_herder_kinematics=self.scenario.use_herder_kinematics,
             )
             
-            self.action_decoder = HighLevelAction(
-                R_ref=np.linalg.norm(new_stage.world_size) / 6.0,
-                R_min=1.0,
-                R_max=np.linalg.norm(new_stage.world_size) / 2.0,
-            )
+            self.action_decoder = HighLevelAction()
             
             self._setup_spaces()
+            self._reset_formation_integrator()
             self.episode_history = []
-    
+
     def get_curriculum_info(self) -> Dict[str, Any]:
         """Get curriculum learning info"""
         stage = self._get_current_stage()
@@ -295,13 +306,19 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
         self,
         num_sheep_range: Tuple[int, int] = (5, 15),
         num_herders_range: Tuple[int, int] = (2, 4),
-        world_size_range: Tuple[Tuple[float, float], Tuple[float, float]] = ((40.0, 40.0), (60.0, 60.0)),
+        world_size_range: Tuple[Tuple[float, float], Tuple[float, float]] = ((100.0, 100.0), (100.0, 100.0)),
         sheep_speed_range: Tuple[float, float] = (0.5, 1.5),
         episode_length: int = 100,
-        dt: float = 0.1,
+        dt: float = 2.0,
         random_seed: Optional[int] = None,
         use_herder_kinematics: bool = True,
         end_episode_when_at_target: bool = False,
+        info_include_flock_state: bool = False,
+        formation_delta_mode: bool = False,
+        formation_delta_theta_max_rad: float = np.pi / 8.0,
+        formation_delta_radius_max: float = 3.0,
+        formation_delta_coverage_max: float = 0.15,
+        high_level_interval: Optional[int] = None,
     ):
         """
         初始化随机化环境
@@ -316,6 +333,9 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             random_seed: 随机种子
             use_herder_kinematics: 与 SheepFlockEnv 相同
             end_episode_when_at_target: 与 SheepFlockEnv 相同
+            info_include_flock_state: 与 SheepFlockEnv 相同
+            formation_delta_mode, formation_delta_*: 与 SheepFlockEnv 相同
+            high_level_interval: 与 SheepFlockEnv 相同
         """
         self.num_sheep_range = num_sheep_range
         self.num_herders_range = num_herders_range
@@ -340,8 +360,14 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             random_seed=random_seed,
             use_herder_kinematics=use_herder_kinematics,
             end_episode_when_at_target=end_episode_when_at_target,
+            info_include_flock_state=info_include_flock_state,
+            formation_delta_mode=formation_delta_mode,
+            formation_delta_theta_max_rad=formation_delta_theta_max_rad,
+            formation_delta_radius_max=formation_delta_radius_max,
+            formation_delta_coverage_max=formation_delta_coverage_max,
+            high_level_interval=high_level_interval,
         )
-    
+
     def reset(self) -> np.ndarray:
         """重置环境，随机化参数"""
         self.current_step = 0
@@ -384,21 +410,19 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             use_herder_kinematics=self.scenario.use_herder_kinematics,
         )
         
-        self.action_decoder = HighLevelAction(
-            R_ref=np.linalg.norm(self.world_size) / 6.0,
-            R_min=1.0,
-            R_max=np.linalg.norm(self.world_size) / 2.0,
-        )
+        self.action_decoder = HighLevelAction()
         
         self._setup_spaces()
         
         target_pos = sample_random_target_position(self.world_size, rng=self._rng)
         
         self.scenario.reset(target_position=target_pos)
-        self.prev_distance = self.scenario.get_distance_to_target()
-        
+        self._sync_prev_d_hat_after_reset()
+        self._reward_components = {}
+        self._reset_formation_integrator()
+
         return self._get_obs()
-    
+
     def _get_info(self) -> Dict[str, Any]:
         """获取额外信息"""
         info = super()._get_info()

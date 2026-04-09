@@ -4,12 +4,25 @@ Single-agent version without num_agents dimension
 """
 
 import argparse
+import math
 import os
 from collections import defaultdict
 import torch
+import torch.nn.functional as F
 import numpy as np
 from datetime import datetime
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
+
+# TensorBoard 仅写入这些标量，避免曲线过多、重复或与训练无关的噪声
+_TB_REWARD_COMPONENTS = frozenset({
+    'r_potential',
+    'r_near',
+    'r_speed',
+    'r_envelope',
+    'r_time',
+    'distance',
+    'd_hat',
+})
 
 from envs import SheepFlockEnv
 from onpolicy.algorithms.ppo_actor_critic import PPOActorCritic
@@ -36,6 +49,86 @@ class SimpleLogger:
                 print("未安装 tensorboard，跳过。安装: pip install tensorboard")
                 print("警告: 已传 --use_tensorboard 但无法创建 SummaryWriter，TensorBoard 将无曲线。")
 
+    @staticmethod
+    def _parse_success_rate(v) -> Optional[float]:
+        if isinstance(v, (int, float, np.floating)):
+            return float(v)
+        if isinstance(v, str):
+            raw = v.strip()
+            had_pct = raw.endswith('%')
+            s = raw.rstrip('%').strip()
+            try:
+                x = float(s)
+                return x / 100.0 if had_pct else x
+            except ValueError:
+                return None
+        return None
+
+    def _write_tensorboard(self, metrics: Dict, step: int) -> None:
+        """只写入训练诊断与环境进度相关的标量；完整指标仍在 log 文件与 JSON。"""
+        w = self.tb_writer
+        if w is None:
+            return
+
+        def add(tag: str, val: float) -> None:
+            w.add_scalar(tag, float(val), step)
+
+        if 'avg_reward' in metrics:
+            add('env/avg_reward', float(metrics['avg_reward']))
+
+        sr = self._parse_success_rate(metrics.get('success_rate'))
+        if sr is not None:
+            add('env/success_rate', sr)
+
+        if 'stage' in metrics:
+            try:
+                add('env/curriculum_stage', float(metrics['stage']))
+            except (TypeError, ValueError):
+                pass
+
+        for key, tag in (
+            ('value_loss', 'ppo/value_loss'),
+            ('policy_loss', 'ppo/policy_loss'),
+            ('entropy', 'ppo/entropy'),
+            ('grad_norm', 'ppo/grad_norm'),
+            ('skipped_minibatches', 'ppo/skipped_minibatches'),
+            ('kl_divergence', 'ppo/kl_divergence'),
+            ('kl_coef', 'ppo/kl_coef'),
+        ):
+            if key not in metrics:
+                continue
+            try:
+                add(tag, float(np.asarray(metrics[key]).item()))
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        for key, tag in (
+            ('lr', 'optim/lr'),
+            ('entropy_coef', 'optim/entropy_coef'),
+            ('clip_param', 'optim/clip_param'),
+            ('gae_lambda', 'optim/gae_lambda'),
+            ('value_pred_error', 'optim/value_pred_error'),
+        ):
+            if key not in metrics:
+                continue
+            try:
+                add(tag, float(np.asarray(metrics[key]).item()))
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        for k, v in metrics.items():
+            if not k.startswith('reward/'):
+                continue
+            name = k.split('/', 1)[1]
+            if name not in _TB_REWARD_COMPONENTS:
+                continue
+            try:
+                add(f'reward/{name}', float(v))
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        w.flush()
+
     def log(self, metrics, *, file_stdout: bool = True, tensorboard: bool = True):
         """file_stdout: 打印并写入 training_log / JSON 历史；tensorboard: 写入事件文件（可更高频）。"""
         if file_stdout:
@@ -55,23 +148,7 @@ class SimpleLogger:
 
         if tensorboard and self.tb_writer is not None:
             step = int(np.asarray(metrics.get('total_steps', 0)).item())
-            for k, v in metrics.items():
-                if k == 'success_rate' and isinstance(v, str):
-                    s = v.strip().rstrip('%')
-                    try:
-                        self.tb_writer.add_scalar('train/success_rate', float(s) / 100.0, step)
-                    except ValueError:
-                        pass
-                    continue
-                try:
-                    if isinstance(v, (bool, np.bool_)):
-                        continue
-                    fv = float(np.asarray(v).item())
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                tag = k if k.startswith('reward/') else f'train/{k}'
-                self.tb_writer.add_scalar(tag, fv, step)
-            self.tb_writer.flush()
+            self._write_tensorboard(metrics, step)
 
     def save_json(self):
         """保存完整的训练历史到JSON文件"""
@@ -96,7 +173,13 @@ def parse_args():
     parser.add_argument('--num_sheep', type=int, default=10)
     parser.add_argument('--num_herders', type=int, default=3)
     parser.add_argument('--episode_length', type=int, default=150)
-    parser.add_argument('--world_size', type=float, nargs=2, default=[50.0, 50.0])
+    parser.add_argument(
+        '--world_size',
+        type=float,
+        nargs=2,
+        default=[100.0, 100.0],
+        help='场地 (W,H)：圆形半径 R=min(W,H)/2，目标在圆心 (0,0)',
+    )
     
     parser.add_argument('--use_curriculum', action='store_true', default=False,
                         help='Use curriculum learning for training')
@@ -116,7 +199,36 @@ def parse_args():
         default=False,
         help='羊群质心距目标 < 阈值时立刻结束 episode（旧行为）；默认关闭，跑满 episode_length 以学习滞留控制',
     )
-
+    parser.add_argument(
+        '--formation_delta',
+        action='store_true',
+        default=False,
+        help='高层 a[0:3] 为编队增量（θ_in、R、coverage）；观测增广 3 维，需与策略输入维一致',
+    )
+    parser.add_argument(
+        '--formation_delta_theta_max_deg',
+        type=float,
+        default=22.5,
+        help='增量模式下 |a[0]|=1 时每档高层决策的最大 Δθ（度）',
+    )
+    parser.add_argument(
+        '--formation_delta_radius_max',
+        type=float,
+        default=3.0,
+        help='增量模式下 |a[1]|=1 时每档最大 ΔR（米）',
+    )
+    parser.add_argument(
+        '--formation_delta_coverage_max',
+        type=float,
+        default=0.15,
+        help='增量模式下 |a[2]|=1 时每档最大 Δcoverage',
+    )
+    parser.add_argument(
+        '--high_level_interval',
+        type=int,
+        default=None,
+        help='每 N 步刷新编队目标；默认 None=增量模式 1、绝对动作 5',
+    )
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--num_env_steps', type=int, default=1000000)
     parser.add_argument('--n_rollout_threads', type=int, default=1)
@@ -141,6 +253,24 @@ def parse_args():
     parser.add_argument('--gae_lambda_min', type=float, default=0.9)
     parser.add_argument('--gae_lambda_max', type=float, default=0.995)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
+    parser.add_argument(
+        '--ppo_log_ratio_clip',
+        type=float,
+        default=20.0,
+        help='对 log(π_new/π_old) 限幅后再 exp，避免 ratio 上溢导致策略梯度爆炸；约 20 对应 ratio≈5e8 上限',
+    )
+    parser.add_argument(
+        '--skip_update_grad_norm',
+        type=float,
+        default=200.0,
+        help='反传后、裁剪前若 grad 范数超过该值则跳过 optimizer.step（0 表示关闭）',
+    )
+    parser.add_argument(
+        '--value_huber_beta',
+        type=float,
+        default=10.0,
+        help='>0 时用 SmoothL1 代替 MSE 作为 value loss（对大误差梯度有界）；0 表示沿用原 MSE',
+    )
 
     parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--layer_N', type=int, default=3)
@@ -187,7 +317,7 @@ def parse_args():
         '--use_tensorboard',
         action='store_true',
         default=False,
-        help='写入 TensorBoard 事件到 run 目录下的 tb/，便于边训边看曲线',
+        help='写入 TensorBoard 到 run/tb/（仅精选标量：env/、ppo/、optim/、reward/ 核心分量）',
     )
     parser.add_argument(
         '--tensorboard_log_interval',
@@ -200,8 +330,30 @@ def parse_args():
     parser.add_argument('--experiment_name', type=str, default='')
     parser.add_argument('--use_proper_time_limits', action='store_true', default=False)
 
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='auto',
+        choices=['auto', 'cuda', 'cpu'],
+        help='策略网络与 PPO 更新使用的设备：auto 检测 CUDA；cuda 强制 GPU（不可用则报错）；cpu 强制 CPU。',
+    )
+
     args = parser.parse_args()
     return args
+
+
+def _extra_sheep_env_kwargs(args) -> Dict[str, Any]:
+    kw: Dict[str, Any] = {}
+    if getattr(args, "formation_delta", False):
+        kw["formation_delta_mode"] = True
+        kw["formation_delta_theta_max_rad"] = float(
+            np.deg2rad(float(args.formation_delta_theta_max_deg))
+        )
+        kw["formation_delta_radius_max"] = float(args.formation_delta_radius_max)
+        kw["formation_delta_coverage_max"] = float(args.formation_delta_coverage_max)
+    if getattr(args, "high_level_interval", None) is not None:
+        kw["high_level_interval"] = int(args.high_level_interval)
+    return kw
 
 
 def make_train_env(args, seed_offset: int = 0):
@@ -209,6 +361,7 @@ def make_train_env(args, seed_offset: int = 0):
     rs = None if args.seed is None else int(args.seed) + int(seed_offset)
     use_herder_kinematics = not args.herder_teleport
     end_on_target = args.end_episode_when_at_target
+    extra_kw = _extra_sheep_env_kwargs(args)
     if args.use_curriculum:
         from envs import CurriculumSheepFlockEnv
         env = CurriculumSheepFlockEnv(
@@ -216,6 +369,7 @@ def make_train_env(args, seed_offset: int = 0):
             random_seed=rs,
             use_herder_kinematics=use_herder_kinematics,
             end_episode_when_at_target=end_on_target,
+            **extra_kw,
         )
     elif args.use_randomized:
         from envs import RandomizedSheepFlockEnv
@@ -224,6 +378,7 @@ def make_train_env(args, seed_offset: int = 0):
             random_seed=rs,
             use_herder_kinematics=use_herder_kinematics,
             end_episode_when_at_target=end_on_target,
+            **extra_kw,
         )
     else:
         from envs import SheepFlockEnv
@@ -235,15 +390,69 @@ def make_train_env(args, seed_offset: int = 0):
             random_seed=rs,
             use_herder_kinematics=use_herder_kinematics,
             end_episode_when_at_target=end_on_target,
+            **extra_kw,
         )
     return env
 
 
-def set_seed(seed):
+def resolve_training_device(device_arg: str) -> torch.device:
+    """
+    解析 --device。注意：羊群仿真 env 始终在 CPU（NumPy）；只有 Actor/Critic 前向与 PPO 反传用本设备。
+    """
+    mode = device_arg.lower().strip()
+    cuda_ok = torch.cuda.is_available()
+    pt_ver = torch.__version__
+    pt_cuda = getattr(torch.version, 'cuda', None)
+
+    if mode == 'cpu':
+        print(f'[设备] 强制 CPU | PyTorch {pt_ver}')
+        return torch.device('cpu')
+
+    if mode == 'cuda':
+        if not cuda_ok:
+            raise RuntimeError(
+                '已指定 --device cuda，但 torch.cuda.is_available() 为 False。\n'
+                f'  PyTorch: {pt_ver}, torch.version.cuda: {pt_cuda}\n'
+                '  请检查：① 是否安装了带 CUDA 的 wheel；② 驱动是否与 wheel 匹配；\n'
+                '  ③ RTX 50 系 (compute capability 12.x / sm_120) 需使用官方说明中支持 Blackwell 的 PyTorch 版本。\n'
+                '  诊断命令: python -c "import torch; print(torch.cuda.is_available()); print(torch.__version__)"'
+            )
+        name = torch.cuda.get_device_name(0)
+        print(f'[设备] CUDA:0 — {name} | PyTorch {pt_ver}, CUDA {pt_cuda}')
+        return torch.device('cuda')
+
+    # auto
+    if cuda_ok:
+        name = torch.cuda.get_device_name(0)
+        print(f'[设备] 自动 CUDA:0 — {name} | PyTorch {pt_ver}, CUDA {pt_cuda}')
+        return torch.device('cuda')
+
+    print(
+        f'[设备] 自动 CPU（CUDA 不可用）| PyTorch {pt_ver}, torch.version.cuda={pt_cuda}\n'
+        '       说明：多进程/多线程环境步进在 CPU 上，若 CUDA 不可用则网络也在 CPU，整体会像「没用 GPU」。\n'
+        '       若本机有 NVIDIA GPU，请重装/升级 PyTorch 与驱动；RTX 50 系需支持 sm_120 的构建。'
+    )
+    return torch.device('cpu')
+
+
+def set_seed(seed, device: torch.device):
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
+    if device.type == 'cuda':
         torch.cuda.manual_seed_all(seed)
+
+
+def resolve_rollout_episode_length(args, envs) -> int:
+    """
+    PPO 每轮采样的步长须与环境的 episode 上限一致（尤其课程学习各 stage 不同时）。
+    取并行 env 与课程各 stage 的 max，保证 buffer 与 GAE 不在中途被错误截断。
+    """
+    if not envs:
+        return int(args.episode_length)
+    first = envs[0]
+    if getattr(args, 'use_curriculum', False) and hasattr(first, 'stages'):
+        return max(int(s.episode_length) for s in first.stages)
+    return max(int(e.episode_length) for e in envs)
 
 
 class PPOTrainer:
@@ -251,14 +460,22 @@ class PPOTrainer:
 
     def __init__(self, args):
         self.args = args
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = resolve_training_device(args.device)
 
-        set_seed(args.seed)
+        set_seed(args.seed, self.device)
 
         n_threads = args.n_rollout_threads
         self.envs = [make_train_env(args, seed_offset=i) for i in range(n_threads)]
         self.env = self.envs[0]
         self.num_herders = args.num_herders
+
+        resolved_ep = resolve_rollout_episode_length(args, self.envs)
+        if resolved_ep != int(args.episode_length):
+            print(
+                f'[rollout] episode_length: CLI {int(args.episode_length)} -> '
+                f'{resolved_ep}（与当前环境/课程各阶段最大值对齐）'
+            )
+        args.episode_length = resolved_ep
 
         # Create policy based on selected architecture
         if args.network_architecture == 'improved_mlp':
@@ -276,6 +493,13 @@ class PPOTrainer:
                 self.env.action_space,
                 self.device,
             ).to(self.device)
+
+        _pd = next(self.policy.parameters()).device
+        print(
+            f'[设备] 策略网络参数 device={_pd}。'
+            f'仿真环境在 CPU；若 nvidia-smi 中 python 有数百 MiB 显存且 Type 为 C，即 GPU 在参与训练。'
+            f'GPU-Util 百分比常偏低（步进耗时主要在 CPU）。'
+        )
 
         self.entropy_coef = args.initial_entropy_coef
         self.initial_entropy_coef = args.initial_entropy_coef
@@ -483,6 +707,11 @@ class PPOTrainer:
         total_entropy = 0
         total_grad_norm = 0
         valid_updates = 0
+        skipped_updates = 0
+
+        log_clip = float(self.args.ppo_log_ratio_clip)
+        skip_gn = float(self.args.skip_update_grad_norm)
+        huber_beta = float(self.args.value_huber_beta)
 
         for _ in range(self.args.ppo_epoch):
             data_generator = self.buffer.feed_forward_generator(
@@ -516,17 +745,33 @@ class PPOTrainer:
                 return_batch = torch.from_numpy(return_batch).to(self.device)
 
                 if torch.isnan(action_log_probs).any() or torch.isnan(values).any():
+                    skipped_updates += 1
                     continue
 
-                ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
-                ratio = torch.clamp(ratio, 0.0, 10.0)
+                log_ratio = action_log_probs - old_action_log_probs_batch
+                log_ratio = torch.clamp(log_ratio, -log_clip, log_clip)
+                ratio = torch.exp(log_ratio)
                 surr1 = ratio * adv_targ
                 surr2 = torch.clamp(ratio, 1 - self.clip_param,
                                    1 + self.clip_param) * adv_targ
 
                 action_loss = -torch.min(surr1, surr2).mean()
 
-                if self.args.use_clipped_value_loss:
+                if huber_beta > 0:
+                    b = huber_beta
+                    if self.args.use_clipped_value_loss:
+                        value_pred_clipped = value_preds_batch + \
+                            (values - value_preds_batch).clamp(
+                                -self.clip_param, self.clip_param)
+                        v1 = F.smooth_l1_loss(
+                            values, return_batch, beta=b, reduction='none')
+                        v2 = F.smooth_l1_loss(
+                            value_pred_clipped, return_batch, beta=b, reduction='none')
+                        value_loss = torch.max(v1, v2).mean()
+                    else:
+                        value_loss = F.smooth_l1_loss(
+                            values, return_batch, beta=b, reduction='mean')
+                elif self.args.use_clipped_value_loss:
                     value_pred_clipped = value_preds_batch + \
                         (values - value_preds_batch).clamp(
                             -self.clip_param, self.clip_param)
@@ -539,11 +784,10 @@ class PPOTrainer:
 
                 # Calculate KL divergence if using KL penalty
                 if self.use_kl_penalty:
-                    # KL divergence = E[log(pi_old/pi_new)] = E[log_prob_old - log_prob_new]
-                    # Should always be non-negative; use abs() to ensure numerical stability
-                    kl_div = torch.clamp(old_action_log_probs_batch - action_log_probs, min=0.0).mean()
+                    # 在旧策略采样动作上，KL(π_old||π_new) 的一阶近似：E[log π_old - log π_new]
+                    log_ratio = old_action_log_probs_batch - action_log_probs
+                    kl_div = log_ratio.mean()
                     self.kl_divergence = kl_div.item()
-                    # Add KL penalty to loss
                     kl_loss = kl_div * self.kl_coef
                     # Calculate value prediction error for adaptive GAE
                     if self.use_adaptive_gae:
@@ -561,26 +805,41 @@ class PPOTrainer:
                            dist_entropy * self.entropy_coef
 
                 if torch.isnan(loss) or torch.isinf(loss):
+                    skipped_updates += 1
                     continue
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                
-                # 计算梯度范数（在裁剪之前）
+
+                has_nan_grad = False
+                for p in self.policy.parameters():
+                    if p.grad is not None and torch.isnan(p.grad).any():
+                        has_nan_grad = True
+                        break
+                if has_nan_grad:
+                    self.optimizer.zero_grad()
+                    skipped_updates += 1
+                    continue
+
                 grad_norm = 0.0
                 for p in self.policy.parameters():
                     if p.grad is not None:
                         grad_norm += p.grad.data.norm(2).item() ** 2
                 grad_norm = grad_norm ** 0.5
-                
-                # 梯度裁剪
+
+                if math.isnan(grad_norm) or math.isinf(grad_norm):
+                    self.optimizer.zero_grad()
+                    skipped_updates += 1
+                    continue
+
+                if skip_gn > 0.0 and grad_norm > skip_gn:
+                    self.optimizer.zero_grad()
+                    skipped_updates += 1
+                    continue
+
                 torch.nn.utils.clip_grad_norm_(
                     self.policy.parameters(), self.args.max_grad_norm)
-                
-                if torch.isnan(torch.tensor(grad_norm)):
-                    self.optimizer.zero_grad()
-                    continue
-                
+
                 self.optimizer.step()
 
                 total_loss += loss.item()
@@ -591,19 +850,22 @@ class PPOTrainer:
                 valid_updates += 1
 
         if valid_updates > 0:
-            return {
+            out = {
                 'total_loss': total_loss / valid_updates,
                 'value_loss': total_value_loss / valid_updates,
                 'policy_loss': total_policy_loss / valid_updates,
                 'entropy': total_entropy / valid_updates,
                 'grad_norm': total_grad_norm / valid_updates,
+                'skipped_minibatches': float(skipped_updates),
             }
+            return out
         return {
             'total_loss': 0.0,
             'value_loss': 0.0,
             'policy_loss': 0.0,
             'entropy': 0.0,
             'grad_norm': 0.0,
+            'skipped_minibatches': float(skipped_updates),
         }
 
     def save(self):
@@ -701,6 +963,7 @@ class PPOTrainer:
                 'policy_loss': train_metrics['policy_loss'],
                 'entropy': train_metrics['entropy'],
                 'grad_norm': train_metrics['grad_norm'],
+                'skipped_minibatches': train_metrics.get('skipped_minibatches', 0.0),
                 'lr': current_lr,
                 'entropy_coef': self.entropy_coef,
                 'clip_param': self.clip_param,
@@ -781,13 +1044,13 @@ class PPOTrainer:
                              (self.args.clip_param - self.clip_param_final) * progress
 
     def adjust_kl_coef(self):
-        if self.use_kl_penalty and self.kl_divergence > 0:
-            if self.kl_divergence > self.target_kl * 1.5:
-                # Increase KL penalty if divergence is too high
-                self.kl_coef = min(self.kl_coef * self.kl_coef_multiplier, self.kl_coef_max)
-            elif self.kl_divergence < self.target_kl * 0.5:
-                # Decrease KL penalty if divergence is too low
-                self.kl_coef = max(self.kl_coef / self.kl_coef_multiplier, self.kl_coef_min)
+        if not self.use_kl_penalty:
+            return
+        kl = self.kl_divergence
+        if kl > self.target_kl * 1.5:
+            self.kl_coef = min(self.kl_coef * self.kl_coef_multiplier, self.kl_coef_max)
+        elif kl < self.target_kl * 0.5:
+            self.kl_coef = max(self.kl_coef / self.kl_coef_multiplier, self.kl_coef_min)
 
     def adjust_gae_lambda(self):
         if self.use_adaptive_gae and self.value_pred_error > 0:

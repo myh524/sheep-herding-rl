@@ -24,7 +24,7 @@ NUM_HERDERS=3
 EPISODE_LENGTH=150
 
 # World size [width, height] (meters)
-WORLD_SIZE="30.0 30.0"
+WORLD_SIZE="100.0 100.0"
 
 # ============================================================================
 # Part 2: Training Mode Selection

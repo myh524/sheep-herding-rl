@@ -134,8 +134,6 @@ from dataclasses import dataclass
 from envs import SheepFlockEnv
 from onpolicy.algorithms.ppo_actor_critic import PPOActorCritic, ImprovedActorCritic
 
-HERDER_EVASION_RADIUS = 8.0
-
 
 @dataclass
 class VisualizationState:
@@ -159,7 +157,13 @@ def parse_args():
     
     parser.add_argument('--num_sheep', type=int, default=10)
     parser.add_argument('--num_herders', type=int, default=3)
-    parser.add_argument('--world_size', type=float, nargs=2, default=[100.0, 100.0])
+    parser.add_argument(
+        '--world_size',
+        type=float,
+        nargs=2,
+        default=[100.0, 100.0],
+        help='场地 (W,H)：圆形半径 R=min/2，目标在圆心',
+    )
     parser.add_argument('--episode_length', type=int, default=150)
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument(
@@ -167,6 +171,31 @@ def parse_args():
         action='store_true',
         default=False,
         help='机械狗直接瞬移到编队目标（关闭运动学），与 train_ppo --herder_teleport 一致',
+    )
+    parser.add_argument(
+        '--formation_delta',
+        action='store_true',
+        default=False,
+        help='与 train_ppo --formation_delta 一致：观测 13 维、a[0:3] 为编队增量',
+    )
+    parser.add_argument(
+        '--formation_delta_theta_max_deg',
+        type=float,
+        default=22.5,
+    )
+    parser.add_argument('--formation_delta_radius_max', type=float, default=3.0)
+    parser.add_argument('--formation_delta_coverage_max', type=float, default=0.15)
+    parser.add_argument(
+        '--high_level_interval',
+        type=int,
+        default=None,
+        help='与 train_ppo 一致；默认 None 使用环境自动默认',
+    )
+    parser.add_argument(
+        '--stochastic_policy',
+        action='store_true',
+        default=False,
+        help='策略按分布随机采样动作（与 train_ppo 采集时 deterministic=False 一致）；默认关闭则为确定性均值动作',
     )
     
     parser.add_argument('--hidden_size', type=int, default=256)
@@ -258,6 +287,18 @@ def detect_layer_N(checkpoint: dict) -> int:
     return 3
 
 
+def detect_policy_obs_dim(checkpoint: dict):
+    """从 checkpoint 推断 Actor 输入维数（与 env.obs_dim 对齐检查用）。"""
+    sd = checkpoint.get("policy_state_dict", checkpoint)
+    w = sd.get("actor.base.mlp.fc1.0.weight")
+    if w is not None:
+        return int(w.shape[1])
+    w = sd.get("actor.base.feature_norm.weight")
+    if w is not None:
+        return int(w.shape[0])
+    return None
+
+
 def detect_hidden_size(checkpoint: dict) -> int:
     if 'policy_state_dict' in checkpoint:
         state_dict = checkpoint['policy_state_dict']
@@ -295,7 +336,16 @@ def load_model(model_path: str, env: SheepFlockEnv, device: torch.device,
         policy = PPOActorCritic(
             args, env.observation_space, env.action_space, device,
         ).to(device)
-    
+
+    ckpt_obs = detect_policy_obs_dim(checkpoint)
+    env_obs = int(env.observation_space.shape[0])
+    if ckpt_obs is not None and ckpt_obs != env_obs:
+        raise RuntimeError(
+            f"观测维数不一致：checkpoint 的 Actor 输入维为 {ckpt_obs}，当前环境为 {env_obs}。\n"
+            f"  - 若模型是旧版（10 维）训练：可视化请去掉 --formation_delta。\n"
+            f"  - 若是增量编队训练（13 维）：请加 --formation_delta（或 VIS_FORMATION_DELTA=1）。"
+        )
+
     if 'policy_state_dict' in checkpoint:
         policy.load_state_dict(checkpoint['policy_state_dict'])
         print(f"Loaded model: step {checkpoint.get('total_num_steps', 'unknown')}")
@@ -330,10 +380,17 @@ class Visualizer:
 
     def setup_figure(self):
         self.fig, self.ax = plt.subplots(figsize=(10, 10))
-        self.ax.set_xlim(0, self.env.world_size[0])
-        self.ax.set_ylim(0, self.env.world_size[1])
+        R = float(self.env.scenario.world_radius)
+        pad = max(R * 0.06, 1.0)
+        self.ax.set_xlim(-R - pad, R + pad)
+        self.ax.set_ylim(-R - pad, R + pad)
         self.ax.set_aspect('equal')
         self.ax.set_facecolor('#f5f5f5')
+        self.ax.add_patch(
+            patches.Circle(
+                (0.0, 0.0), R, fill=False, edgecolor="0.5", linewidth=1.2, linestyle="--"
+            )
+        )
 
         if self._interactive:
             ax_pause = plt.axes([0.85, 0.01, 0.12, 0.04])
@@ -373,10 +430,11 @@ class Visualizer:
             rnn_states_critic_tensor = torch.from_numpy(self.rnn_states_critic).to(self.device)
             masks_tensor = torch.from_numpy(self.masks).to(self.device)
             
+            deterministic = not getattr(self.args, "stochastic_policy", False)
             value, action, action_log_prob, rnn_states_actor_out, rnn_states_critic_out = \
                 self.policy.get_actions(
                     obs_tensor, rnn_states_actor_tensor, rnn_states_critic_tensor,
-                    masks_tensor, deterministic=True,
+                    masks_tensor, deterministic=deterministic,
                 )
             
             self.rnn_states_actor = rnn_states_actor_out.cpu().numpy()
@@ -387,15 +445,70 @@ class Visualizer:
     def render_env(self):
         self.ax.clear()
         
-        self.ax.set_xlim(0, self.env.world_size[0])
-        self.ax.set_ylim(0, self.env.world_size[1])
+        R = float(self.env.scenario.world_radius)
+        pad = max(R * 0.06, 1.0)
+        self.ax.set_xlim(-R - pad, R + pad)
+        self.ax.set_ylim(-R - pad, R + pad)
         self.ax.set_aspect('equal')
         self.ax.set_facecolor('#f5f5f5')
+
+        arena = patches.Circle(
+            (0.0, 0.0), R, fill=False, edgecolor="0.5", linewidth=1.2, linestyle="--"
+        )
+        self.ax.add_patch(arena)
         
         target = self.env.scenario.get_target_position()
         target_circle = patches.Circle(target, 3.0, color='green', alpha=0.3)
         self.ax.add_patch(target_circle)
         self.ax.plot(target[0], target[1], 'g*', markersize=20)
+
+        # 与当前仿真一致：[4]–[7] 为轴对齐四向极值 e0..e3/R，与 r_envelope 包络矩形相同
+        obs_vec = self.env.scenario.get_observation()
+        if obs_vec is not None and len(obs_vec) >= 8:
+            o4, o5, o6, o7 = (
+                float(obs_vec[4]),
+                float(obs_vec[5]),
+                float(obs_vec[6]),
+                float(obs_vec[7]),
+            )
+            tx, ty = float(target[0]), float(target[1])
+            w_rect = (o4 + o6) * R
+            h_rect = (o5 + o7) * R
+            x0 = tx - o6 * R
+            y0 = ty - o7 * R
+            if len(self.env.scenario.sheep) > 0 and w_rect > 1e-4 and h_rect > 1e-4:
+                env_rect = patches.Rectangle(
+                    (x0, y0),
+                    w_rect,
+                    h_rect,
+                    linewidth=1.6,
+                    edgecolor="darkviolet",
+                    facecolor="mediumpurple",
+                    alpha=0.14,
+                    zorder=2,
+                )
+                self.ax.add_patch(env_rect)
+            area_bb = w_rect * h_rect
+            area_norm = area_bb / max((2.0 * R) ** 2, 1e-6)
+            obs_txt = (
+                "观测 [4]–[7]：轴对齐四向极值 e0..e3 / R（与包络惩罚一致）\n"
+                f"[4] e0=max(Δx+)/R = {o4:.3f}  [5] e1=max(Δy+)/R = {o5:.3f}\n"
+                f"[6] e2=max(Δx−)/R = {o6:.3f}  [7] e3=max(Δy−)/R = {o7:.3f}\n"
+                f"AABB 面积 A = {area_bb:.1f}  (A/r_scale² = {area_norm:.3f}, r_scale=2R)"
+            )
+            self.ax.text(
+                0.02,
+                0.98,
+                obs_txt,
+                transform=self.ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=8,
+                family="monospace",
+                color="#222",
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.88, edgecolor="0.6"),
+                zorder=10,
+            )
         
         flock_state = self.env.scenario.get_flock_state()
         sheep_positions = flock_state['positions']
@@ -410,75 +523,113 @@ class Visualizer:
         
         herder_positions = self.env.scenario.herder_positions.copy()
         
-        if len(self.state.action_history) > 0 and hasattr(self.env.scenario, 'herder_targets'):
-            last_action = self.state.action_history[-1]
+        if hasattr(self.env.scenario, 'herder_targets'):
             herder_targets = self.env.scenario.herder_targets
-            
-            fc = self.env.scenario.get_flock_center()
             target_pos = self.env.scenario.get_target_position()
-            target_direction = np.arctan2(
-                target_pos[1] - fc[1],
-                target_pos[0] - fc[0]
-            )
-            
-            decoded = self.env.action_decoder.decode_action(last_action, target_direction)
-            wedge_center = decoded['wedge_center']
-            wedge_width = decoded['wedge_width']
-            radius = decoded['radius']
-            asymmetry = decoded['asymmetry']
-            
-            station_ring = patches.Circle(fc, radius, fill=False, 
-                                         color='orange', linewidth=2, alpha=0.7)
-            self.ax.add_patch(station_ring)
-            
-            main_target_x = fc[0] + radius * np.cos(wedge_center)
-            main_target_y = fc[1] + radius * np.sin(wedge_center)
-            self.ax.plot(main_target_x, main_target_y, 'o', color='red', 
-                        markersize=12, markeredgecolor='darkred', markeredgewidth=2)
-            
-            wedge_angle = wedge_width * np.pi
-            
-            wedge = patches.Wedge(
-                fc, radius * 1.2,
-                np.degrees(wedge_center - wedge_angle),
-                np.degrees(wedge_center + wedge_angle),
-                width=radius * 0.4,
-                facecolor='orange', alpha=0.2,
-                edgecolor='darkorange', linewidth=1.5,
-            )
-            self.ax.add_patch(wedge)
-            
-            for i in range(self.env.num_herders):
-                target_pos_i = herder_targets[i]
+            # 与仿真一致：羊质心/弧来自「上次高层刷新」时的 decode，而非每步策略输出
+            # （env.high_level_interval 内 herder_targets 不变，但 action_history 每步都在变）
+            viz_dec = getattr(self.env, "_last_formation_decoded", None)
+            flock_c = None
+            radius = None
+            coverage = None
+            theta_mid = None
+            if viz_dec is not None:
+                flock_c = np.asarray(viz_dec["flock_center"], dtype=float)
+                radius = float(viz_dec["radius"])
+                coverage = float(viz_dec["coverage"])
+                theta_mid = float(viz_dec["theta_mid_rad"])
+            elif len(self.state.action_history) > 0 and not getattr(
+                self.env, "formation_delta_mode", False
+            ):
+                last_action = self.state.action_history[-1]
+                fc = self.env.scenario.get_flock_center()
+                decoded = self.env.action_decoder.decode_action(
+                    last_action,
+                    fc,
+                    self.env.world_size,
+                )
+                flock_c = np.asarray(decoded["flock_center"], dtype=float)
+                radius = float(decoded["radius"])
+                coverage = float(decoded["coverage"])
+                theta_mid = float(decoded["theta_mid_rad"])
+
+            if flock_c is not None and radius is not None:
+                dec = self.env.action_decoder
+                O = flock_c.astype(float)
+                theta_mid_deg = float(np.degrees(theta_mid))
+                span_rad, at_max_span = dec.effective_span_radians(
+                    coverage, self.env.num_herders
+                )
+                span_deg = float(np.degrees(span_rad))
+
+                arc_ring = patches.Circle(
+                    O, radius, fill=False, color="orange", linewidth=2, alpha=0.7
+                )
+                self.ax.add_patch(arc_ring)
+
+                self.ax.plot(O[0], O[1], "o", color="red", markersize=12,
+                            markeredgecolor="darkred", markeredgewidth=2)
+
+                if span_deg > 0.5:
+                    wedge = patches.Wedge(
+                        O,
+                        radius,
+                        theta_mid_deg - span_deg / 2.0,
+                        theta_mid_deg + span_deg / 2.0,
+                        width=radius * 0.15,
+                        facecolor="orange",
+                        alpha=0.2,
+                        edgecolor="darkorange",
+                        linewidth=1.5,
+                    )
+                    self.ax.add_patch(wedge)
                 
-                self.ax.plot(target_pos_i[0], target_pos_i[1], 'o', color='darkorange', 
-                            markersize=8, alpha=0.6, markeredgecolor='black', markeredgewidth=1)
-                
-                if i < len(herder_positions):
-                    hpos = herder_positions[i]
-                    direction = target_pos_i - hpos
-                    dist = np.linalg.norm(direction)
+                for i in range(self.env.num_herders):
+                    target_pos_i = herder_targets[i]
                     
-                    if dist > 0.5:
-                        direction = direction / dist
-                        arrow_len = min(dist * 0.4, 3.0)
-                        self.ax.annotate('', 
-                                        xy=(hpos[0] + direction[0] * arrow_len, 
-                                            hpos[1] + direction[1] * arrow_len),
-                                        xytext=hpos,
-                                        arrowprops=dict(arrowstyle='->', color='green', 
-                                                       lw=1.5, alpha=0.8))
-            
-            mode = self.env.action_decoder.get_formation_mode(wedge_width)
-            spread_deg = wedge_width * 180
-            self.ax.text(fc[0], fc[1] - 2, f'{mode} | r={radius:.1f} w={spread_deg:.0f} a={asymmetry:.2f}', 
-                        ha='center', fontsize=9, color='darkorange', fontweight='bold')
+                    self.ax.plot(target_pos_i[0], target_pos_i[1], 'o', color='darkorange', 
+                                markersize=8, alpha=0.6, markeredgecolor='black', markeredgewidth=1)
+                    
+                    if i < len(herder_positions):
+                        hpos = herder_positions[i]
+                        direction = target_pos_i - hpos
+                        dist = np.linalg.norm(direction)
+                        
+                        if dist > 0.5:
+                            direction = direction / dist
+                            arrow_len = min(dist * 0.4, 3.0)
+                            self.ax.annotate('', 
+                                            xy=(hpos[0] + direction[0] * arrow_len, 
+                                                hpos[1] + direction[1] * arrow_len),
+                                            xytext=hpos,
+                                            arrowprops=dict(arrowstyle='->', color='green', 
+                                                           lw=1.5, alpha=0.8))
+                
+                mode = self.env.action_decoder.get_formation_mode(coverage)
+                mx = " MAX" if at_max_span else ""
+                self.ax.text(
+                    O[0],
+                    O[1] - 2,
+                    f"{mode}{mx} | R={radius:.1f} cov={coverage:.2f} Θ={span_deg:.0f}°",
+                    ha="center",
+                    fontsize=9,
+                    color="darkorange",
+                    fontweight="bold",
+                )
         
+        evasion_r = float(
+            self.env.scenario.sheep_config.get("evasion_radius", 8.0)
+        )
         for i, hpos in enumerate(herder_positions):
             evasion_circle = patches.Circle(
-                hpos, HERDER_EVASION_RADIUS, 
-                fill=True, facecolor='blue', alpha=0.08,
-                edgecolor='blue', linestyle='--', linewidth=1,
+                hpos,
+                evasion_r,
+                fill=True,
+                facecolor="blue",
+                alpha=0.08,
+                edgecolor="blue",
+                linestyle="--",
+                linewidth=1,
             )
             self.ax.add_patch(evasion_circle)
         
@@ -494,7 +645,7 @@ class Visualizer:
             plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='blue',
                       markersize=10, markeredgecolor='darkblue', label='Herder'),
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
-                      markersize=10, markeredgecolor='darkred', label='Main Target'),
+                      markersize=10, markeredgecolor='darkred', label='Arc center (flock)'),
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkorange',
                       markersize=8, markeredgecolor='black', label='Sampled Target'),
             patches.Patch(facecolor='orange', alpha=0.2, edgecolor='darkorange',
@@ -629,7 +780,30 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
+    if args.stochastic_policy:
+        print("Policy: 随机采样动作 (--stochastic_policy，与训练 rollout 一致)")
+        if args.seed is not None:
+            s = int(args.seed)
+            torch.manual_seed(s)
+            if device.type == "cuda":
+                torch.cuda.manual_seed_all(s)
+    else:
+        print("Policy: 确定性动作（默认；加 --stochastic_policy 可改为随机采样）")
     
+    extra_kw = {}
+    if getattr(args, "formation_delta", False):
+        extra_kw.update(
+            {
+                "formation_delta_mode": True,
+                "formation_delta_theta_max_rad": float(
+                    np.deg2rad(float(args.formation_delta_theta_max_deg))
+                ),
+                "formation_delta_radius_max": float(args.formation_delta_radius_max),
+                "formation_delta_coverage_max": float(args.formation_delta_coverage_max),
+            }
+        )
+    if getattr(args, "high_level_interval", None) is not None:
+        extra_kw["high_level_interval"] = int(args.high_level_interval)
     env = SheepFlockEnv(
         world_size=tuple(args.world_size),
         num_sheep=args.num_sheep,
@@ -637,8 +811,21 @@ def main():
         episode_length=args.episode_length,
         random_seed=args.seed,
         use_herder_kinematics=not args.herder_teleport,
+        **extra_kw,
     )
-    
+    print(
+        f"Env: formation_delta_mode={env.formation_delta_mode}, "
+        f"high_level_interval={env.high_level_interval}, obs_dim={env.obs_dim}"
+    )
+    if not env.formation_delta_mode:
+        parts = [
+            "说明: 当前为**绝对动作**（默认），弧由 a[0:3] 直接解码。",
+            "若训练用了 --formation_delta，须加 --formation_delta 且 obs=13。",
+        ]
+        if args.stochastic_policy:
+            parts.append("已开 --stochastic_policy：每步从分布采样，占位易剧烈跳动；纯观察可关掉。")
+        print(" ".join(parts))
+
     policy, args = load_model(args.model_path, env, device, args)
     
     visualizer = Visualizer(env, policy, device, args)

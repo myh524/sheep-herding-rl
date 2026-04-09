@@ -164,11 +164,9 @@ class BoundedACTLayer(nn.Module):
     Action layer for bounded continuous action spaces.
     Designed for the sheep herding high-level controller.
 
-    Action outputs:
-    - radius_mean: [0, 20] - Standing radius around flock center
-    - radius_std: [0, 5] - Radius variation
-    - angle_mean: [-pi, pi] - Gathering angle
-    - concentration: [0, 1] - How concentrated the formation is
+    动作语义由 envs.high_level_action.HighLevelAction 解码（羊质心圆弧）：
+    - [0]: θ_in=a[0]·π（弧中点→羊），θ_mid=θ_in−π；[1]: R；[2]: coverage→Θ
+    - [3][4]: 解码器内固定为 0，不使用
     """
 
     def __init__(

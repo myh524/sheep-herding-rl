@@ -5,7 +5,160 @@ SheepScenario: 羊群引导场景管理类
 
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
+
 from envs.sheep_entity import SheepEntity
+
+
+def _np_seek_to_position(
+    pos: np.ndarray,
+    target: np.ndarray,
+    max_speed: float,
+    max_force: float,
+    vel: np.ndarray,
+) -> np.ndarray:
+    """与 SheepEntity.seek 一致的转向力（float32）。"""
+    desired = target.astype(np.float32) - pos.astype(np.float32)
+    distance = float(np.linalg.norm(desired))
+    if distance <= 0:
+        return np.zeros(2, dtype=np.float32)
+    desired = desired / distance * np.float32(max_speed)
+    steer = desired - vel
+    sn = float(np.linalg.norm(steer))
+    if sn > max_force:
+        steer = (steer / np.float32(sn) * np.float32(max_force)).astype(np.float32)
+    return steer.astype(np.float32)
+
+
+def _boids_separation(
+    diff: np.ndarray,
+    dist_sq: np.ndarray,
+    per_mask: np.ndarray,
+    sep_r_sq: float,
+    max_speed: float,
+    max_force: float,
+    vel: np.ndarray,
+) -> np.ndarray:
+    sep_m = per_mask & (dist_sq > np.float32(1e-12)) & (dist_sq < np.float32(sep_r_sq))
+    if not np.any(sep_m):
+        return np.zeros(2, dtype=np.float32)
+    ds = dist_sq[sep_m][:, np.newaxis].astype(np.float64) + 1e-6
+    contrib = diff[sep_m].astype(np.float64) / ds
+    steer = np.mean(contrib, axis=0).astype(np.float32)
+    sn = float(np.linalg.norm(steer))
+    if sn <= 0:
+        return np.zeros(2, dtype=np.float32)
+    steer = (steer / np.float32(sn) * np.float32(max_speed) - vel).astype(np.float32)
+    sn2 = float(np.linalg.norm(steer))
+    if sn2 > max_force:
+        steer = (steer / np.float32(sn2) * np.float32(max_force)).astype(np.float32)
+    return steer
+
+
+def _boids_alignment(
+    velocities: np.ndarray,
+    per_mask: np.ndarray,
+    max_speed: float,
+    max_force: float,
+    vel_i: np.ndarray,
+) -> np.ndarray:
+    if not np.any(per_mask):
+        return np.zeros(2, dtype=np.float32)
+    avg_v = np.mean(velocities[per_mask].astype(np.float64), axis=0).astype(np.float32)
+    an = float(np.linalg.norm(avg_v))
+    if an <= 0:
+        return np.zeros(2, dtype=np.float32)
+    desired = (avg_v / np.float32(an) * np.float32(max_speed)).astype(np.float32)
+    steer = desired - vel_i
+    sn = float(np.linalg.norm(steer))
+    if sn > max_force:
+        steer = (steer / np.float32(sn) * np.float32(max_force)).astype(np.float32)
+    return steer
+
+
+def _boids_cohesion(
+    positions: np.ndarray,
+    per_mask: np.ndarray,
+    pos_i: np.ndarray,
+    max_speed: float,
+    max_force: float,
+    vel_i: np.ndarray,
+) -> np.ndarray:
+    if not np.any(per_mask):
+        return np.zeros(2, dtype=np.float32)
+    center = np.mean(positions[per_mask].astype(np.float64), axis=0).astype(np.float32)
+    return _np_seek_to_position(pos_i, center, max_speed, max_force, vel_i)
+
+
+def _boids_evasion(
+    pos: np.ndarray,
+    herders: np.ndarray,
+    evasion_radius: float,
+    max_speed: float,
+    max_force: float,
+    vel_i: np.ndarray,
+) -> np.ndarray:
+    ev_sq = float(evasion_radius * evasion_radius)
+    acc = np.zeros(2, dtype=np.float64)
+    count = 0
+    for hi in range(herders.shape[0]):
+        diff = pos.astype(np.float64) - herders[hi].astype(np.float64)
+        dsq = float(diff[0] * diff[0] + diff[1] * diff[1])
+        if dsq < ev_sq and dsq > 0:
+            acc = acc + diff / (dsq + 1e-6)
+            count += 1
+    if count == 0:
+        return np.zeros(2, dtype=np.float32)
+    steer = (acc / float(count)).astype(np.float32)
+    sn = float(np.linalg.norm(steer))
+    if sn <= 0:
+        return np.zeros(2, dtype=np.float32)
+    steer = (steer / np.float32(sn) * np.float32(max_speed * 1.5) - vel_i).astype(np.float32)
+    sn2 = float(np.linalg.norm(steer))
+    mf2 = max_force * 2.0
+    if sn2 > mf2:
+        steer = (steer / np.float32(sn2) * np.float32(mf2)).astype(np.float32)
+    return steer
+
+
+def world_radius_from_size(world_size: Tuple[float, float]) -> float:
+    """圆形场地：半径 = min(W,H)/2，目标在圆心 (0,0)。"""
+    return float(min(float(world_size[0]), float(world_size[1])) / 2.0)
+
+
+def clip_position_to_disk(
+    position: np.ndarray, world_radius: float, epsilon: float = 1e-6
+) -> np.ndarray:
+    p = np.asarray(position, dtype=np.float32).reshape(2)
+    r = float(np.linalg.norm(p))
+    lim = float(world_radius)
+    if r > lim and r > epsilon:
+        p = (p * (np.float32(lim) / np.float32(r))).astype(np.float32)
+    return p
+
+
+def _boids_boundary_disk_batch(
+    positions: np.ndarray,
+    world_radius: float,
+    margin: float,
+    max_force: float,
+) -> np.ndarray:
+    """越出圆盘 r > R−margin 时施加指向圆心的边界力。"""
+    R = float(world_radius)
+    m = float(margin)
+    mf = np.float32(max_force)
+    lim = max(R - m, 1e-3)
+    xy = positions.astype(np.float32)
+    r = np.sqrt(xy[:, 0] * xy[:, 0] + xy[:, 1] * xy[:, 1]).astype(np.float32)
+    out = np.zeros_like(positions, dtype=np.float32)
+    mask = r > np.float32(lim)
+    if not np.any(mask):
+        return out
+    invr = np.where(r > np.float32(1e-6), np.float32(1.0) / r, np.float32(0.0))
+    ux = (-xy[:, 0] * invr).astype(np.float32)
+    uy = (-xy[:, 1] * invr).astype(np.float32)
+    out[mask, 0] = ux[mask] * mf
+    out[mask, 1] = uy[mask] * mf
+    return out
 
 
 def sample_random_target_position(
@@ -14,44 +167,22 @@ def sample_random_target_position(
     rng: Optional[Any] = None,
 ) -> np.ndarray:
     """
-    在世界矩形内均匀随机采样目标点（与各轴独立均匀分布）。
-
-    Args:
-        world_size: (width, height)
-        margin: 距边界的内缩距离，与羊群初始位置裁剪一致（默认 1.0）
-        rng: 可选，np.random.RandomState 等；为 None 时使用全局 np.random
+    圆形场地、目标固定在圆心 (0,0)；保留签名以兼容调用方，忽略 world_size/margin。
     """
-    w, h = float(world_size[0]), float(world_size[1])
-    m = float(margin)
-    x_lo, x_hi = m, w - m
-    y_lo, y_hi = m, h - m
-    if x_lo > x_hi:
-        x_lo = x_hi = w * 0.5
-    if y_lo > y_hi:
-        y_lo = y_hi = h * 0.5
-
-    def _uniform(low: float, high: float) -> float:
-        if rng is not None:
-            return float(rng.uniform(low, high))
-        return float(np.random.uniform(low, high))
-
-    return np.array([_uniform(x_lo, x_hi), _uniform(y_lo, y_hi)], dtype=np.float32)
+    return np.zeros(2, dtype=np.float32)
 
 
 class SheepScenario:
     """
-    场景管理类
-    
-    管理整个羊群引导场景，包括:
-    - 羊群实体
-    - 机械狗位置
-    - 目标位置
-    - 场景边界
+    场景管理类（圆形场地，目标在圆心 (0,0)）
+
+    - world_size 的较小边为直径，场地半径 R = min(W,H)/2，合法位置满足 |p| ≤ R
+    - 目标固定为原点；观测中位置量以极坐标 (ρ/r_max, θ/π) 等形式给出
     """
-    
+
     def __init__(
         self,
-        world_size: Tuple[float, float] = (50.0, 50.0),
+        world_size: Tuple[float, float] = (100.0, 100.0),
         num_sheep: int = 10,
         num_herders: int = 3,
         target_position: Optional[np.ndarray] = None,
@@ -60,13 +191,11 @@ class SheepScenario:
         use_herder_kinematics: bool = True,
     ):
         """
-        初始化场景
-        
         Args:
-            world_size: 世界大小 (width, height)
+            world_size: (W, H)，取 min 为直径定义圆形场地
             num_sheep: 羊的数量
             num_herders: 机械狗数量
-            target_position: 目标位置，如果为 None 则在合法矩形内均匀随机
+            target_position: 忽略，目标恒为 (0,0)
             sheep_config: 羊的配置参数
             random_seed: 随机种子
             use_herder_kinematics: False 时机械狗每步直接置于编队目标点（无运动学），便于调试高层队形
@@ -76,27 +205,32 @@ class SheepScenario:
         
         self.use_herder_kinematics = use_herder_kinematics
         self.world_size = world_size
+        self.world_radius = world_radius_from_size(world_size)
         self.num_sheep = num_sheep
         self.num_herders = num_herders
         
         self.sheep_config = sheep_config or {
-            'max_speed': 3.0,
+            'max_speed': 2.0,
             'max_force': 0.3,
-            'perception_radius': 5.0,
-            'separation_radius': 2.0,
+            'perception_radius': 30.0,
+            'separation_radius': 3.0,
+            'velocity_drag': 0.55,
+            'evasion_radius': 5.0,
         }
         
         self.sheep: List[SheepEntity] = []
         self.herder_positions: np.ndarray = np.zeros((num_herders, 2), dtype=np.float32)
-        self.target_position = target_position
+        self.target_position = np.zeros(2, dtype=np.float32)
         
         self.boids_weights = {
-            'separation': 1.5,
-            'alignment': 1.0,
-            'cohesion': 1.0,
-            'evasion': 2.0,
+            'separation': 1.0,
+            'alignment': 0.1,
+            'cohesion': 0.5,
+            'evasion': 1.0,
             'boundary': 1.0,
         }
+        # 向量化 Boids 与 SheepEntity 行为对齐；False 时回退逐羊 Python 循环（调试用）
+        self.vectorized_sheep_updates = True
         
         self._init_scenario()
     
@@ -107,42 +241,65 @@ class SheepScenario:
         self._init_target()
     
     def _init_sheep(self):
-        """初始化羊群"""
+        """羊群以「一团」初始化：随机群体中心 + 中心附近小圆盘内均匀撒点。"""
         self.sheep = []
-        center = np.array([self.world_size[0] * 0.3, self.world_size[1] * 0.5])
-        spread = 5.0
-        
-        for _ in range(self.num_sheep):
-            pos = center + np.random.uniform(-spread, spread, 2)
-            pos = np.clip(pos, [1, 1], [self.world_size[0]-1, self.world_size[1]-1])
-            
+        R = float(self.world_radius)
+        margin = 1.0
+        lim = R - margin
+        n = int(self.num_sheep)
+
+        cluster_r = float(
+            min(2.5 + 0.55 * np.sqrt(max(n, 1)), 0.22 * R)
+        )
+        cluster_r = max(cluster_r, min(1.0, 0.06 * R))
+        max_center_r = max(lim - cluster_r - 0.5, 0.12 * R)
+        min_center_r = min(0.26 * R, max_center_r * 0.55)
+        if max_center_r <= min_center_r + 1e-3:
+            min_center_r = max(0.1 * R, max_center_r * 0.3)
+            max_center_r = max(min_center_r + 0.5, lim - cluster_r)
+
+        ca = float(np.random.uniform(0.0, 2.0 * np.pi))
+        cr = float(np.random.uniform(min_center_r, max(max_center_r, min_center_r + 1e-3)))
+        flock_center = np.array(
+            [np.cos(ca) * cr, np.sin(ca) * cr], dtype=np.float32
+        )
+        flock_center = clip_position_to_disk(flock_center, max(lim - cluster_r, 0.1 * R))
+
+        for _ in range(n):
+            ang = float(np.random.uniform(0.0, 2.0 * np.pi))
+            rad = float(np.sqrt(np.random.uniform(0.0, 1.0)) * cluster_r)
+            pos = flock_center + np.array(
+                [np.cos(ang) * rad, np.sin(ang) * rad], dtype=np.float32
+            )
+            pos = clip_position_to_disk(pos, lim)
+
             sheep = SheepEntity(
                 position=pos,
                 max_speed=self.sheep_config['max_speed'],
                 max_force=self.sheep_config['max_force'],
                 perception_radius=self.sheep_config['perception_radius'],
                 separation_radius=self.sheep_config['separation_radius'],
+                velocity_drag=self.sheep_config.get('velocity_drag', 0.55),
+                evasion_radius=self.sheep_config.get('evasion_radius', 8.0),
             )
             self.sheep.append(sheep)
     
     def _init_herders(self):
-        """初始化机械狗位置"""
+        """在圆周内侧初始化机械狗（默认在 π 方向附近排开）。"""
         self.herder_positions = np.zeros((self.num_herders, 2), dtype=np.float32)
-        start_x = self.world_size[0] * 0.1
-        spacing = self.world_size[1] / (self.num_herders + 1)
-        
-        for i in range(self.num_herders):
-            self.herder_positions[i] = [
-                start_x,
-                spacing * (i + 1)
-            ]
+        R = float(self.world_radius)
+        base_r = 0.62 * R
+        n = self.num_herders
+        for i in range(n):
+            ang = float(np.pi + (i - (n - 1) / 2.0) * 0.4)
+            p = np.array(
+                [np.cos(ang) * base_r, np.sin(ang) * base_r], dtype=np.float32
+            )
+            self.herder_positions[i] = clip_position_to_disk(p, R - 0.5)
     
     def _init_target(self):
-        """初始化目标位置"""
-        if self.target_position is None:
-            self.target_position = sample_random_target_position(self.world_size)
-        else:
-            self.target_position = np.array(self.target_position, dtype=np.float32)
+        """目标固定在圆心。"""
+        self.target_position = np.zeros(2, dtype=np.float32)
     
     def reset(
         self,
@@ -153,14 +310,13 @@ class SheepScenario:
         重置场景
         
         Args:
-            target_position: 新的目标位置
+            target_position: 忽略（目标恒为圆心）
             random_seed: 新的随机种子
         """
         if random_seed is not None:
             np.random.seed(random_seed)
         
-        if target_position is not None:
-            self.target_position = np.array(target_position, dtype=np.float32)
+        self.target_position = np.zeros(2, dtype=np.float32)
         
         self._init_sheep()
         self._init_herders()
@@ -175,7 +331,7 @@ class SheepScenario:
         targets = np.array(targets, dtype=np.float32)
         self.herder_targets = targets.copy()
     
-    def update_herders(self, dt: float = 0.1):
+    def update_herders(self, dt: float = 2.0):
         """
         更新机械狗位置（向目标移动，自动避开羊群）
         
@@ -191,16 +347,25 @@ class SheepScenario:
         
         if not self.use_herder_kinematics:
             for i in range(self.num_herders):
-                self.herder_positions[i] = np.clip(
-                    self.herder_targets[i],
-                    [0.0, 0.0],
-                    [self.world_size[0], self.world_size[1]],
+                self.herder_positions[i] = clip_position_to_disk(
+                    self.herder_targets[i], self.world_radius
                 ).astype(np.float32)
             return
         
-        flock_center = self.get_flock_center()
-        flock_spread = self.get_flock_spread()
-        avoid_radius = flock_spread * 2.5 + 3.0
+        # 一次堆叠位置，避免 get_flock_center / get_flock_spread 各扫一遍羊群
+        if self.sheep:
+            pos_arr = np.asarray([s.position for s in self.sheep], dtype=np.float32)
+            flock_center = np.mean(pos_arr, axis=0).astype(np.float32)
+            if pos_arr.shape[0] < 2:
+                flock_spread = 0.0
+            else:
+                flock_spread = float(
+                    np.std(np.linalg.norm(pos_arr - flock_center, axis=1))
+                )
+        else:
+            flock_center = np.zeros(2, dtype=np.float32)
+            flock_spread = 0.0
+        avoid_radius = float(flock_spread * 2.5 + 3.0)
         
         for i in range(self.num_herders):
             current_pos = self.herder_positions[i]
@@ -229,11 +394,9 @@ class SheepScenario:
                 move_direction = move_direction / move_norm
                 self.herder_positions[i] += move_direction * min(5.0 * dt, target_dist)
             
-            self.herder_positions[i] = np.clip(
-                self.herder_positions[i],
-                [0, 0],
-                [self.world_size[0], self.world_size[1]]
-            )
+            self.herder_positions[i] = clip_position_to_disk(
+                self.herder_positions[i], self.world_radius
+            ).astype(np.float32)
     
     def set_herder_positions(self, positions: np.ndarray):
         """
@@ -245,34 +408,83 @@ class SheepScenario:
         positions = np.array(positions, dtype=np.float32)
         
         for i in range(min(len(positions), self.num_herders)):
-            self.herder_positions[i] = np.clip(
-                positions[i],
-                [0, 0],
-                [self.world_size[0], self.world_size[1]]
-            )
+            self.herder_positions[i] = clip_position_to_disk(
+                positions[i], self.world_radius
+            ).astype(np.float32)
     
-    def update_sheep(self, dt: float = 0.1):
+    def update_sheep(self, dt: float = 2.0):
         """
         更新羊群状态
         
         应用Boids规则并更新每只羊的位置
         """
+        if self.vectorized_sheep_updates:
+            self._update_sheep_vectorized(dt)
+        else:
+            self._update_sheep_legacy(dt)
+
+    def _update_sheep_legacy(self, dt: float = 2.0):
         herder_list = [self.herder_positions[i] for i in range(self.num_herders)]
-        
         for sheep in self.sheep:
             sheep.apply_boids_rules(
                 all_sheep=self.sheep,
                 herders=herder_list,
-                world_size=self.world_size,
+                world_radius=self.world_radius,
                 weights=self.boids_weights,
             )
             sheep.update(dt)
-            
-            sheep.position = np.clip(
-                sheep.position,
-                [0, 0],
-                [self.world_size[0], self.world_size[1]]
+            sheep.position[:] = clip_position_to_disk(
+                sheep.position, self.world_radius
             )
+
+    def _update_sheep_vectorized(self, dt: float = 2.0):
+        """
+        与 _update_sheep_legacy 相同的更新顺序：按列表顺序每只羊先算力再积分，
+        后续羊看到的是前面羊已更新后的位置/速度（与逐实体循环语义一致）。
+        """
+        n = len(self.sheep)
+        if n == 0:
+            return
+        sh0 = self.sheep[0]
+        per_r2 = np.float32(sh0.perception_radius * sh0.perception_radius)
+        sep_r2 = float(sh0.separation_radius * sh0.separation_radius)
+        max_speed = float(sh0.max_speed)
+        max_force = float(sh0.max_force)
+        evasion_r = float(getattr(sh0, 'evasion_radius', 8.0))
+        H = self.herder_positions.astype(np.float32)
+        w = self.boids_weights
+
+        for i in range(n):
+            P = np.stack([s.position for s in self.sheep]).astype(np.float32)
+            V = np.stack([s.velocity for s in self.sheep]).astype(np.float32)
+            bdf = _boids_boundary_disk_batch(P, self.world_radius, 2.0, max_force)[i]
+
+            diff = (P[i] - P).astype(np.float32)
+            dist_sq = np.sum(diff * diff, axis=1).astype(np.float32)
+            per = (dist_sq < per_r2) & (dist_sq > np.float32(1e-12))
+            per = per.copy()
+            per[i] = False
+
+            sep_f = _boids_separation(diff, dist_sq, per, sep_r2, max_speed, max_force, V[i])
+            ali_f = _boids_alignment(V, per, max_speed, max_force, V[i])
+            coh_f = _boids_cohesion(P, per, P[i], max_speed, max_force, V[i])
+            eva_f = _boids_evasion(P[i], H, evasion_r, max_speed, max_force, V[i])
+
+            total = (
+                sep_f * np.float32(w.get('separation', 1.0))
+                + ali_f * np.float32(w.get('alignment', 1.0))
+                + coh_f * np.float32(w.get('cohesion', 1.0))
+                + eva_f * np.float32(w.get('evasion', 1.0))
+                + bdf * np.float32(w.get('boundary', 1.0))
+            )
+
+            sheep = self.sheep[i]
+            sheep.acceleration[:] = 0.0
+            sheep.apply_force(total)
+            sheep.update(dt)
+            sheep.position[:] = clip_position_to_disk(
+                sheep.position, self.world_radius
+            ).astype(np.float32)
     
     def get_flock_center(self) -> np.ndarray:
         """获取羊群质心位置"""
@@ -399,7 +611,7 @@ class SheepScenario:
         flock_center = self.get_flock_center()
         target = self.target_position
         
-        r_max = np.linalg.norm(self.world_size) / 2.0
+        r_max = float(self.world_radius)
         d_goal = np.linalg.norm(flock_center - target)
         high_state[0] = d_goal / r_max
         
@@ -454,94 +666,136 @@ class SheepScenario:
     def get_target_position(self) -> np.ndarray:
         """获取目标位置"""
         return self.target_position.copy()
+
+    def _append_herder_centroid_polar_flock(
+        self,
+        obs: np.ndarray,
+        r_max: float,
+    ) -> np.ndarray:
+        """拼接机械狗质心相对羊群质心的极坐标：ρ/r_max、θ/π（与 SheepFlockEnv 主观测一致）。"""
+        base = 8
+        rm = np.float32(max(r_max, 1e-6))
+        if self.num_herders <= 0:
+            obs[base] = np.float32(0.0)
+            obs[base + 1] = np.float32(0.0)
+            return obs
+        fc = self.get_flock_center().astype(np.float32)
+        hc = np.mean(self.herder_positions.astype(np.float32), axis=0)
+        rel = hc - fc
+        rn = float(np.linalg.norm(rel))
+        obs[base] = np.clip(
+            np.float32(rn / rm), np.float32(-10.0), np.float32(10.0)
+        )
+        if rn > 1e-6:
+            ang = float(np.arctan2(float(rel[1]), float(rel[0])) / np.pi)
+        else:
+            ang = 0.0
+        obs[base + 1] = np.clip(np.float32(ang), np.float32(-1.0), np.float32(1.0))
+        return obs
+
+    def _observation_snapshot(self) -> Tuple[np.ndarray, np.ndarray, float]:
+        """10 维 obs：8 维羊群 + 2 维狗质心相对羊质心极坐标；返回 (obs, flock_center, r_max_shared)。"""
+        dim = 10
+        obs = np.zeros(dim, dtype=np.float32)
+        r_shared = float(max(self.world_radius, 1e-6))
+        target = self.target_position.astype(np.float32)
+        r_max = r_shared
+
+        if not self.sheep:
+            obs = self._append_herder_centroid_polar_flock(obs, r_max)
+            obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
+            return obs, np.zeros(2, dtype=np.float32), r_shared
+
+        positions = np.asarray([s.position for s in self.sheep], dtype=np.float32)
+        velocities = np.asarray([s.velocity for s in self.sheep], dtype=np.float32)
+        flock_center = np.mean(positions, axis=0).astype(np.float32)
+
+        max_sheep_speed = float(self.sheep_config.get("max_speed", 3.0))
+        if max_sheep_speed <= 0:
+            max_sheep_speed = 1.0
+
+        to_target = target - flock_center
+        d_fc = float(np.linalg.norm(to_target))
+        obs[0] = np.clip(
+            np.float32(d_fc / r_max), np.float32(-10.0), np.float32(10.0)
+        )
+        if d_fc > 1e-6:
+            obs[1] = np.clip(
+                np.float32(
+                    np.arctan2(float(to_target[1]), float(to_target[0])) / np.pi
+                ),
+                np.float32(-1.0),
+                np.float32(1.0),
+            )
+        else:
+            obs[1] = np.float32(0.0)
+
+        mean_velocity = np.mean(velocities, axis=0).astype(np.float32)
+        v_sp = float(np.linalg.norm(mean_velocity))
+        obs[2] = np.clip(
+            np.float32(v_sp / max_sheep_speed), np.float32(-1.0), np.float32(1.0)
+        )
+        if v_sp > 1e-6:
+            obs[3] = np.clip(
+                np.float32(
+                    np.arctan2(float(mean_velocity[1]), float(mean_velocity[0]))
+                    / np.pi
+                ),
+                np.float32(-1.0),
+                np.float32(1.0),
+            )
+        else:
+            obs[3] = np.float32(0.0)
+
+        # [4:8] 与奖励包络一致：轴对齐四向极值 e0..e3（相对目标），各除以 r_max
+        rel = positions.astype(np.float64) - target.astype(np.float64).reshape(1, 2)
+        e0 = float(np.max(rel[:, 0]))
+        e1 = float(np.max(rel[:, 1]))
+        e2 = float(np.max(-rel[:, 0]))
+        e3 = float(np.max(-rel[:, 1]))
+        obs[4] = np.clip(np.float32(e0 / r_max), np.float32(-10.0), np.float32(10.0))
+        obs[5] = np.clip(np.float32(e1 / r_max), np.float32(-10.0), np.float32(10.0))
+        obs[6] = np.clip(np.float32(e2 / r_max), np.float32(-10.0), np.float32(10.0))
+        obs[7] = np.clip(np.float32(e3 / r_max), np.float32(-10.0), np.float32(10.0))
+
+        obs = self._append_herder_centroid_polar_flock(obs, r_max)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
+        return obs, flock_center, r_shared
     
     def get_observation(self) -> np.ndarray:
         """
-        Get normalized observation vector (10-dimensional)
-        
-        Observation structure:
-        - [0]: d_goal / r_max - distance from flock center to target (normalized)
-        - [1:3]: cos φ, sin φ - direction from flock to target (unit vector)
-        - [3]: flock_speed / max_speed - flock speed magnitude (normalized)
-        - [4:6]: cos θ_vel, sin θ_vel - flock velocity direction (relative to target)
-        - [6]: spread / r_max - flock spread (normalized)
-        - [7:9]: cos θ_main, sin θ_main - flock main direction (relative to target)
-        - [9]: num_sheep / 30.0 - flock size (normalized)
-        
-        Returns:
-            10-dimensional normalized observation vector
+        10 维（与 N 无关）：
+        - [0]: 质心到目标距离 / r_max；[1]: 质心相对目标的方位角 / π
+        - [2]: 平均速度模 / max_speed；[3]: 平均速度方位角 / π
+        - [4:8]: 羊群相对目标轴对齐四向极值 e0..e3 / r_max（与 r_envelope 包络一致）
+        - [8]: 狗质心相对羊质心的极径 / r_max；[9]: 该相对位移方位角 / π
         """
-        obs = np.zeros(10, dtype=np.float32)
-        
-        flock_center = self.get_flock_center()
-        target = self.target_position
-        r_max = np.linalg.norm(self.world_size) / 2.0
-        r_max = max(r_max, 1.0)
-        
-        to_target = target - flock_center
-        d_goal = np.linalg.norm(to_target)
-        obs[0] = np.clip(d_goal / r_max, 0.0, 10.0)
-        
-        if d_goal > 1e-6:
-            direction = to_target / d_goal
-            obs[1] = direction[0]
-            obs[2] = direction[1]
-        else:
-            obs[1] = 1.0
-            obs[2] = 0.0
-        
-        theta_target = np.arctan2(to_target[1], to_target[0])
-        
-        velocities = np.array([s.velocity for s in self.sheep])
-        mean_velocity = np.mean(velocities, axis=0)
-        flock_speed = np.linalg.norm(mean_velocity)
-        max_sheep_speed = 3.0
-        obs[3] = np.clip(flock_speed / max_sheep_speed, 0.0, 1.0)
-        
-        if flock_speed > 1e-6:
-            vel_direction = mean_velocity / flock_speed
-            theta_vel = np.arctan2(vel_direction[1], vel_direction[0])
-            theta_vel_rel = theta_vel - theta_target
-            theta_vel_rel = np.arctan2(np.sin(theta_vel_rel), np.cos(theta_vel_rel))
-            obs[4] = np.cos(theta_vel_rel)
-            obs[5] = np.sin(theta_vel_rel)
-        else:
-            obs[4] = 0.0
-            obs[5] = 0.0
-        
-        spread = self.get_flock_spread()
-        obs[6] = np.clip(spread / r_max, 0.0, 10.0)
-        
-        theta_main = self.get_flock_main_direction()
-        theta_rel = theta_main - theta_target
-        theta_rel = np.arctan2(np.sin(theta_rel), np.cos(theta_rel))
-        obs[7] = np.cos(theta_rel)
-        obs[8] = np.sin(theta_rel)
-        
-        obs[9] = np.clip(len(self.sheep) / 30.0, 0.0, 2.0)
-        
-        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
-        
-        return obs
+        return self._observation_snapshot()[0]
     
     def get_shared_observation(self) -> np.ndarray:
         """
         Get shared observation vector (for centralized Critic)
         
-        Uses 10-dim observation, extended with individual herder positions
-        Shape: (obs_dim + num_herders * 2,) = (10 + 3 * 2,) = (16,)
+        在完整 get_observation() 后再拼接各狗相对羊群质心的极坐标 (ρ/r_shared, θ/π)。
+        Shape: (10 + 2 * num_herders)，默认 N=3 时为 16
         """
-        obs = self.get_observation()
-        
-        shared_obs = list(obs)
-        
-        flock_center = self.get_flock_center()
-        r_max = np.linalg.norm(self.world_size) / 2.0
+        obs, flock_center, r_shared = self._observation_snapshot()
+        parts = [obs]
+        rs = np.float32(max(r_shared, 1e-6))
         for i in range(self.num_herders):
-            rel_pos = self.herder_positions[i] - flock_center
-            shared_obs.extend(rel_pos / r_max)
-        
-        return np.array(shared_obs, dtype=np.float32)
+            rel = (self.herder_positions[i] - flock_center).astype(np.float32)
+            rn = float(np.linalg.norm(rel))
+            pr = np.clip(np.float32(rn / rs), np.float32(-10.0), np.float32(10.0))
+            if rn > 1e-6:
+                pa = np.clip(
+                    np.float32(np.arctan2(float(rel[1]), float(rel[0])) / np.pi),
+                    np.float32(-1.0),
+                    np.float32(1.0),
+                )
+            else:
+                pa = np.float32(0.0)
+            parts.append(np.array([pr, pa], dtype=np.float32))
+        return np.concatenate(parts).astype(np.float32)
     
     def set_boids_weights(self, weights: Dict[str, float]):
         """设置Boids规则权重"""
@@ -551,6 +805,7 @@ class SheepScenario:
         return (
             f"SheepScenario("
             f"world_size={self.world_size}, "
+            f"world_radius={self.world_radius:.3g}, "
             f"num_sheep={self.num_sheep}, "
             f"num_herders={self.num_herders}, "
             f"use_herder_kinematics={self.use_herder_kinematics}, "

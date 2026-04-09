@@ -15,7 +15,7 @@ class HerderEntity:
         """Set target position (from high-level policy)"""
         self.target_position = np.array(target_position, dtype=np.float32)
     
-    def update(self, dt=0.1):
+    def update(self, dt=2.0):
         """Update position towards target with physical constraints"""
         if self.target_position is None:
             return

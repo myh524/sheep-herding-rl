@@ -4,7 +4,7 @@ SheepEntity: 羊群中单个羊的实体类
 """
 
 import numpy as np
-from typing import Tuple, List, Optional
+from typing import List, Optional
 
 
 class SheepEntity:
@@ -17,6 +17,8 @@ class SheepEntity:
         max_speed: 最大速度
         max_force: 最大转向力
         perception_radius: 感知半径
+        velocity_drag: 全局速度阻尼 (1/s)，无持续受力时渐停
+        evasion_radius: 感知到机械狗并产生逃避力的距离（世界坐标单位）
     """
     
     def __init__(
@@ -27,6 +29,8 @@ class SheepEntity:
         max_force: float = 0.1,
         perception_radius: float = 5.0,
         separation_radius: float = 2.0,
+        velocity_drag: float = 0.55,
+        evasion_radius: float = 8.0,
     ):
         self.position = np.array(position, dtype=np.float32)
         
@@ -44,12 +48,17 @@ class SheepEntity:
         self.max_force = max_force
         self.perception_radius = perception_radius
         self.separation_radius = separation_radius
+        self.velocity_drag = velocity_drag
+        self.evasion_radius = evasion_radius
         
         self.acceleration = np.zeros(2, dtype=np.float32)
     
-    def update(self, dt: float = 0.1):
+    def update(self, dt: float = 0.2):
         """更新羊的位置和速度"""
         self.velocity += self.acceleration * dt
+        
+        if self.velocity_drag > 0.0:
+            self.velocity *= np.float32(np.exp(-self.velocity_drag * dt))
         
         speed = np.linalg.norm(self.velocity)
         if speed > self.max_speed:
@@ -72,14 +81,16 @@ class SheepEntity:
         steer = np.zeros(2, dtype=np.float32)
         count = 0
         
+        sep_sq = self.separation_radius * self.separation_radius
         for other in neighbors:
             diff = self.position - other.position
-            distance = np.linalg.norm(diff)
-            
-            if 0 < distance < self.separation_radius:
-                diff = diff / (distance * distance + 1e-6)
-                steer += diff
-                count += 1
+            dist_sq = float(diff[0] * diff[0] + diff[1] * diff[1])
+            if dist_sq <= 0.0 or dist_sq >= sep_sq:
+                continue
+            distance = np.sqrt(dist_sq)
+            diff = diff / (distance * distance + 1e-6)
+            steer = steer + diff
+            count += 1
         
         if count > 0:
             steer = steer / count
@@ -100,12 +111,15 @@ class SheepEntity:
         
         avg_velocity = np.zeros(2, dtype=np.float32)
         count = 0
-        
+        per_sq = self.perception_radius * self.perception_radius
+
         for other in neighbors:
-            distance = np.linalg.norm(self.position - other.position)
-            if 0 < distance < self.perception_radius:
-                avg_velocity += other.velocity
-                count += 1
+            diff = self.position - other.position
+            dist_sq = float(diff[0] * diff[0] + diff[1] * diff[1])
+            if dist_sq <= 0.0 or dist_sq >= per_sq:
+                continue
+            avg_velocity += other.velocity
+            count += 1
         
         if count > 0:
             avg_velocity = avg_velocity / count
@@ -127,12 +141,15 @@ class SheepEntity:
         
         center = np.zeros(2, dtype=np.float32)
         count = 0
-        
+        per_sq = self.perception_radius * self.perception_radius
+
         for other in neighbors:
-            distance = np.linalg.norm(self.position - other.position)
-            if 0 < distance < self.perception_radius:
-                center += other.position
-                count += 1
+            diff = self.position - other.position
+            dist_sq = float(diff[0] * diff[0] + diff[1] * diff[1])
+            if dist_sq <= 0.0 or dist_sq >= per_sq:
+                continue
+            center += other.position
+            count += 1
         
         if count > 0:
             center = center / count
@@ -140,24 +157,27 @@ class SheepEntity:
         
         return np.zeros(2, dtype=np.float32)
     
-    def evasion(self, herders: List[np.ndarray], evasion_radius: float = 8.0) -> np.ndarray:
+    def evasion(self, herders: List[np.ndarray]) -> np.ndarray:
         """
-        逃避规则: 远离机械狗
+        逃避规则: 远离机械狗（作用距离为 self.evasion_radius）
         """
         if not herders:
             return np.zeros(2, dtype=np.float32)
         
         steer = np.zeros(2, dtype=np.float32)
         count = 0
-        
+        r = float(self.evasion_radius)
+        ev_sq = r * r
+
         for herder_pos in herders:
             diff = self.position - herder_pos
-            distance = np.linalg.norm(diff)
-            
-            if distance < evasion_radius:
-                diff = diff / (distance * distance + 1e-6)
-                steer += diff
-                count += 1
+            dist_sq = float(diff[0] * diff[0] + diff[1] * diff[1])
+            if dist_sq <= 0.0 or dist_sq >= ev_sq:
+                continue
+            distance = np.sqrt(dist_sq)
+            diff = diff / (distance * distance + 1e-6)
+            steer += diff
+            count += 1
         
         if count > 0:
             steer = steer / count
@@ -183,31 +203,26 @@ class SheepEntity:
         
         return np.zeros(2, dtype=np.float32)
     
-    def boundary_force(self, world_size: Tuple[float, float], margin: float = 2.0) -> np.ndarray:
-        """
-        边界力: 避免羊跑出边界
-        """
+    def boundary_force(self, world_radius: float, margin: float = 2.0) -> np.ndarray:
+        """圆形场地：r > R−margin 时受指向圆心的边界力。"""
         steer = np.zeros(2, dtype=np.float32)
-        
-        if self.position[0] < margin:
-            steer[0] = self.max_force
-        elif self.position[0] > world_size[0] - margin:
-            steer[0] = -self.max_force
-        
-        if self.position[1] < margin:
-            steer[1] = self.max_force
-        elif self.position[1] > world_size[1] - margin:
-            steer[1] = -self.max_force
-        
+        p = self.position.astype(np.float32)
+        r = float(np.linalg.norm(p))
+        lim = float(world_radius) - float(margin)
+        if r > lim and r > 1e-6:
+            inward = (-p / np.float32(r)).astype(np.float32)
+            steer = inward * np.float32(self.max_force)
         return steer
     
     def get_neighbors(self, all_sheep: List['SheepEntity']) -> List['SheepEntity']:
         """获取感知范围内的邻居"""
         neighbors = []
+        per_sq = self.perception_radius * self.perception_radius
         for other in all_sheep:
             if other is not self:
-                distance = np.linalg.norm(self.position - other.position)
-                if distance < self.perception_radius:
+                diff = self.position - other.position
+                dist_sq = float(diff[0] * diff[0] + diff[1] * diff[1])
+                if dist_sq < per_sq:
                     neighbors.append(other)
         return neighbors
     
@@ -215,7 +230,7 @@ class SheepEntity:
         self,
         all_sheep: List['SheepEntity'],
         herders: List[np.ndarray],
-        world_size: Tuple[float, float],
+        world_radius: float,
         weights: Optional[dict] = None,
     ):
         """
@@ -228,14 +243,6 @@ class SheepEntity:
             - evasion: 逃避权重
             - boundary: 边界权重
         """
-        if weights is None:
-            weights = {
-                'separation': 1.5,
-                'alignment': 1.0,
-                'cohesion': 1.0,
-                'evasion': 2.0,
-                'boundary': 1.0,
-            }
         
         neighbors = self.get_neighbors(all_sheep)
         
@@ -243,7 +250,7 @@ class SheepEntity:
         ali_force = self.alignment(neighbors) * weights.get('alignment', 1.0)
         coh_force = self.cohesion(neighbors) * weights.get('cohesion', 1.0)
         eva_force = self.evasion(herders) * weights.get('evasion', 1.0)
-        bnd_force = self.boundary_force(world_size) * weights.get('boundary', 1.0)
+        bnd_force = self.boundary_force(world_radius) * weights.get('boundary', 1.0)
         
         self.apply_force(sep_force + ali_force + coh_force + eva_force + bnd_force)
     

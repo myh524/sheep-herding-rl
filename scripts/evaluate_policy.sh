@@ -7,8 +7,8 @@ MODEL_PATH="${1:-results/sheep_herding/default/ppo/seed1/models/model_1000.pt}"
 NUM_EPISODES="${2:-100}"
 NUM_SHEEP="${3:-6}"
 NUM_HERDERS="${4:-3}"
-WORLD_SIZE_X="${5:-30.0}"
-WORLD_SIZE_Y="${6:-30.0}"
+WORLD_SIZE_X="${5:-100.0}"
+WORLD_SIZE_Y="${6:-100.0}"
 VERBOSE="${7:---verbose}"
 
 # 检查模型文件是否存在

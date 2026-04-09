@@ -6,8 +6,12 @@ SheepFlockEnv: 羊群引导强化学习环境
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional, Union
 from gym import spaces
-from envs.sheep_scenario import SheepScenario, sample_random_target_position
-from envs.high_level_action import HighLevelAction
+from envs.sheep_scenario import SheepScenario, clip_position_to_disk
+from envs.high_level_action import (
+    HighLevelAction,
+    STANCE_RADIUS_MAX,
+    STANCE_RADIUS_MIN,
+)
 
 
 class SheepFlockEnv:
@@ -20,30 +24,42 @@ class SheepFlockEnv:
     
     def __init__(
         self,
-        world_size: Tuple[float, float] = (50.0, 50.0),
+        world_size: Tuple[float, float] = (100.0, 100.0),
         num_sheep: int = 10,
         num_herders: int = 3,
         episode_length: int = 100,
-        dt: float = 0.1,
+        dt: float = 2.0,
         reward_config: Optional[Dict[str, float]] = None,
         random_seed: Optional[int] = None,
         use_herder_kinematics: bool = True,
         end_episode_when_at_target: bool = False,
+        info_include_flock_state: bool = False,
+        formation_delta_mode: bool = False,
+        formation_delta_theta_max_rad: float = np.pi / 16.0,
+        formation_delta_radius_max: float = 2.0,
+        formation_delta_coverage_max: float = 0.10,
+        high_level_interval: Optional[int] = None,
     ):
         """
         初始化环境
         
         Args:
-            world_size: 世界大小
+            world_size: (W,H)，圆形场地半径 R=min(W,H)/2，目标在圆心 (0,0)
             num_sheep: 羊的数量
             num_herders: 机械狗数量
             episode_length: 每个episode的最大步数
             dt: 时间步长
-            reward_config: 奖励配置
+            reward_config: 稠密奖励系数（见 _compute_reward 内注释）
             random_seed: 随机种子
             use_herder_kinematics: False 时狗直接出现在编队目标（关闭势场运动学）
             end_episode_when_at_target: True 时羊群进入目标阈值后立刻结束（旧行为）；
                 False 时始终跑满 episode_length，便于学习抵达后仍把羊群控制在目标附近
+            info_include_flock_state: True 时 step 的 info 含完整 flock_state（耗 CPU）；调试/可视化可开
+            formation_delta_mode: True 时 a[0:3] 为每档高层决策上的增量（θ_in、R、coverage），并增广观测 3 维
+            formation_delta_theta_max_rad: |a[0]|≤1 时单档最大转角增量
+            formation_delta_radius_max: |a[1]|≤1 时单档半径增量（米）
+            formation_delta_coverage_max: |a[2]|≤1 时单档 coverage 增量
+            high_level_interval: 每 N 个 env step 刷新编队目标；None 时增量模式默认 1，绝对动作默认 5
         """
         self.world_size = world_size
         self.num_sheep = num_sheep
@@ -52,17 +68,36 @@ class SheepFlockEnv:
         self.dt = dt
         self.random_seed = random_seed
         self.end_episode_when_at_target = end_episode_when_at_target
-        
-        self.high_level_interval = 5
+        self.info_include_flock_state = info_include_flock_state
+        self.formation_delta_mode = bool(formation_delta_mode)
+        self.formation_delta_theta_max_rad = float(formation_delta_theta_max_rad)
+        self.formation_delta_radius_max = float(formation_delta_radius_max)
+        self.formation_delta_coverage_max = float(formation_delta_coverage_max)
+
+        self._formation_theta_in = 0.0
+        self._formation_radius = float(
+            (STANCE_RADIUS_MIN + STANCE_RADIUS_MAX) / 2.0
+        )
+        self._formation_coverage = 0.5
+
+        if high_level_interval is None:
+            self.high_level_interval = 1 if self.formation_delta_mode else 5
+        else:
+            self.high_level_interval = max(1, int(high_level_interval))
         self.step_count = 0
         
         self.reward_config = reward_config or {
-            'distance_reward_weight': 1.0,
-            'spread_penalty_weight': 0.1,
-            'success_bonus': 10.0,
-            'timeout_penalty': -5.0,
-            'collision_penalty': -0.5,
-            'time_penalty_weight': 1.0,
+            'w_potential': 3.0,
+            'w_near': 0.35,
+            'near_d0_alpha': 0.15,
+            'w_speed': 0.25,
+            'v_ref_scale': 1.0,
+            'w_spread': 0.12,
+            'envelope_area_ref': 0.12,
+            'time_penalty': 0.005,
+            'time_penalty_off_threshold_m': 5.0,
+            'reward_clip_low': -3.0,
+            'reward_clip_high': 5.0,
         }
         
         self.scenario = SheepScenario(
@@ -73,20 +108,14 @@ class SheepFlockEnv:
             use_herder_kinematics=use_herder_kinematics,
         )
         
-        self.action_decoder = HighLevelAction(
-            R_min=5.0,
-            R_max=20.0,
-        )
+        self.action_decoder = HighLevelAction()
         
         self._setup_spaces()
         
         self.current_step = 0
-        self.prev_distance = None
-        self.prev_potential = None
-        
-        # 奖励平滑机制
-        self.reward_history = []
-        self.reward_smoothing_window = 5
+        self.prev_d_hat = 1.0
+        # 最近一次真正用于 set_herder_targets 的 decode（与 high_level_interval 对齐；供可视化）
+        self._last_formation_decoded: Optional[Dict[str, Any]] = None
         
         # 奖励组件诊断日志
         self._reward_components = {}
@@ -97,11 +126,21 @@ class SheepFlockEnv:
     
     def _setup_spaces(self):
         """Set up observation and action spaces"""
-        self.obs_dim = 10
-        self.action_dim = 4
-        
-        obs_low = np.array([0.0, -1.0, -1.0, 0.0, -1.0, -1.0, 0.0, -1.0, -1.0, 0.0], dtype=np.float32)
-        obs_high = np.array([10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 10.0, 1.0, 1.0, 2.0], dtype=np.float32)
+        # 8 维羊群相关 + 2 维机械狗**质心**相对**羊质心**的极坐标（与 N 无关）
+        # 增量编队模式再 +3：θ_in/π、R 归一化、coverage 归一化
+        base_obs = 10
+        self.obs_dim = base_obs + (3 if self.formation_delta_mode else 0)
+        self.action_dim = 5
+
+        obs_low = np.full(self.obs_dim, -10.0, dtype=np.float32)
+        obs_low[2:4] = -1.0
+        obs_low[9] = -1.0
+        obs_high = np.full(self.obs_dim, 10.0, dtype=np.float32)
+        obs_high[2:4] = 1.0
+        obs_high[9] = 1.0
+        if self.formation_delta_mode:
+            obs_low[10:13] = -1.0
+            obs_high[10:13] = 1.0
         
         self.observation_space = spaces.Box(
             low=obs_low,
@@ -110,8 +149,8 @@ class SheepFlockEnv:
             dtype=np.float32,
         )
         
-        action_low = np.array([-1.0, -1.0, -1.0, -1.0], dtype=np.float32)
-        action_high = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+        action_low = np.full(5, -1.0, dtype=np.float32)
+        action_high = np.full(5, 1.0, dtype=np.float32)
         
         self.action_space = spaces.Box(
             low=action_low,
@@ -120,6 +159,7 @@ class SheepFlockEnv:
             dtype=np.float32,
         )
         
+        # 主观测 + 各狗相对羊群质心的极坐标（每只 2 维，供中心化 Critic）
         self.share_observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -141,16 +181,13 @@ class SheepFlockEnv:
             np.random.seed(self._seed)
             self._seed = None
         
-        target_pos = sample_random_target_position(self.world_size)
+        self.scenario.reset(target_position=None)
+        self._sync_prev_d_hat_after_reset()
+        self._last_formation_decoded = None
+        self._reset_formation_integrator()
 
-        self.scenario.reset(target_position=target_pos)
-        self.prev_distance = self.scenario.get_distance_to_target()
-        self.prev_potential = None
-        
-        # Reset reward smoothing history
-        self.reward_history = []
         self._reward_components = {}
-        
+
         return self._get_obs()
     
     def get_shared_obs(self) -> np.ndarray:
@@ -158,16 +195,21 @@ class SheepFlockEnv:
         获取共享观测
         
         Returns:
-            共享观测，形状为 (num_herders, obs_dim)
+            一维向量，长度 obs_dim + num_herders * 2（与 share_observation_space 一致）
         """
-        return self.scenario.get_shared_observation()
+        base = self.scenario.get_shared_observation()
+        if not self.formation_delta_mode:
+            return base
+        return np.concatenate([base, self._formation_obs_tail()], axis=0).astype(
+            np.float32
+        )
 
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         """
         Execute action
         
         High-level decision frequency control:
-        - Only update herder targets every N steps (high_level_interval)
+        - 每 high_level_interval 个 env step 刷新编队目标（(step_count-1) % N == 0，故 N=1 时每步刷新）
         - Herders move towards targets with physical constraints
         - Sheep update with continuous evasion force
         
@@ -183,7 +225,7 @@ class SheepFlockEnv:
         self.current_step += 1
         self.step_count += 1
         
-        if self.step_count % self.high_level_interval == 1:
+        if (self.step_count - 1) % self.high_level_interval == 0:
             target_positions = self._sample_herder_positions(actions)
             self.scenario.set_herder_targets(target_positions)
         
@@ -201,48 +243,89 @@ class SheepFlockEnv:
         
         return obs, reward, done, info
     
+    def _reset_formation_integrator(self) -> None:
+        if not self.formation_delta_mode:
+            return
+        d = self.action_decoder
+        self._formation_theta_in = 0.0
+        self._formation_radius = float((d.R_min + d.R_max) / 2.0)
+        self._formation_coverage = 0.5
+
+    def _formation_obs_tail(self) -> np.ndarray:
+        d = self.action_decoder
+        span = max(float(d.R_max - d.R_min), 1e-6)
+        r_n = 2.0 * (self._formation_radius - d.R_min) / span - 1.0
+        r_n = float(np.clip(r_n, -1.0, 1.0))
+        ti_n = float(np.clip(self._formation_theta_in / np.pi, -1.0, 1.0))
+        cov_n = float(np.clip(self._formation_coverage * 2.0 - 1.0, -1.0, 1.0))
+        return np.array([ti_n, r_n, cov_n], dtype=np.float32)
+
     def _sample_herder_positions(self, actions: np.ndarray) -> np.ndarray:
         """
-        Sample herder target positions based on actions
-        
-        New Action Space (4D):
-        - wedge_center: Formation center angle (relative to target direction)
-        - wedge_width: Formation spread (0=push, 1=surround)
-        - radius: Distance from flock center
-        - asymmetry: Flank offset for steering
-        
+        羊质心圆弧：5D 动作中仅 a[0]–a[2] 有效。
+        默认：`a[0]·π`=θ_in（弧中点→羊质心），R、coverage 由 a[1],a[2] 直接映射。
+        formation_delta_mode：a[0:3] 为每档高层决策上的增量，再 clip/wrap 后解码。
+
         Physical constraints:
         - Minimum distance between herders
         - Safe distance from flock boundary
         - World boundary constraints
         """
-        flock_center = self.scenario.get_flock_center()
-        target = self.scenario.get_target_position()
-        
-        target_direction = np.arctan2(
-            target[1] - flock_center[1],
-            target[0] - flock_center[0]
-        )
-        
-        positions = np.zeros((self.num_herders, 2), dtype=np.float32)
-        
         action = actions[0] if actions.ndim > 1 else actions
-        
-        decoded = self.action_decoder.decode_action(action, target_direction)
-        
-        angles, radii = self.action_decoder.sample_herder_positions(
+        flock_center = self.scenario.get_flock_center()
+
+        if self.formation_delta_mode:
+            da = np.asarray(action[:3], dtype=np.float64)
+            self._formation_theta_in += float(da[0]) * self.formation_delta_theta_max_rad
+            self._formation_theta_in = float(
+                np.arctan2(
+                    np.sin(self._formation_theta_in),
+                    np.cos(self._formation_theta_in),
+                )
+            )
+            self._formation_radius += float(da[1]) * self.formation_delta_radius_max
+            self._formation_radius = float(
+                np.clip(
+                    self._formation_radius,
+                    self.action_decoder.R_min,
+                    self.action_decoder.R_max,
+                )
+            )
+            self._formation_coverage += float(da[2]) * self.formation_delta_coverage_max
+            self._formation_coverage = float(np.clip(self._formation_coverage, 0.0, 1.0))
+            decoded = self.action_decoder.decoded_from_formation_params(
+                flock_center,
+                self.world_size,
+                self._formation_theta_in,
+                self._formation_radius,
+                self._formation_coverage,
+            )
+        else:
+            decoded = self.action_decoder.decode_action(
+                action,
+                flock_center,
+                self.world_size,
+            )
+        self._last_formation_decoded = {
+            "flock_center": np.asarray(decoded["flock_center"], dtype=np.float32).copy(),
+            "radius": float(decoded["radius"]),
+            "coverage": float(decoded["coverage"]),
+            "theta_in_rad": float(decoded["theta_in_rad"]),
+            "theta_mid_rad": float(decoded["theta_mid_rad"]),
+        }
+        positions = self.action_decoder.sample_herder_positions(
             self.num_herders,
-            **decoded
-        )
+            decoded["flock_center"],
+            decoded["radius"],
+            decoded["coverage"],
+            decoded["theta_mid_rad"],
+        ).copy()
         
         min_herder_distance = 2.0
         flock_safe_distance = 3.0
         
         for i in range(self.num_herders):
-            pos = flock_center + np.array([
-                radii[i] * np.cos(angles[i]),
-                radii[i] * np.sin(angles[i])
-            ])
+            pos = positions[i].copy()
             
             for j in range(i):
                 diff = pos - positions[j]
@@ -252,201 +335,117 @@ class SheepFlockEnv:
                     pos = pos + correction
                     positions[j] = positions[j] - correction
             
-            pos = np.clip(pos, [flock_safe_distance, flock_safe_distance], 
-                         [self.world_size[0] - flock_safe_distance, 
-                          self.world_size[1] - flock_safe_distance])
+            R = float(self.scenario.world_radius)
+            lim = max(R - flock_safe_distance, 0.5)
+            pos = clip_position_to_disk(pos, lim)
             
             positions[i] = pos
         
         return positions
-    
+
+    @staticmethod
+    def _flock_axis_envelope_area(
+        sheep_positions: np.ndarray,
+        target: np.ndarray,
+    ) -> float:
+        """
+        与观测四向包络一致：e0..e3 为轴对齐支持值，AABB 面积 (e0+e2)(e1+e3)。
+        sheep_positions: (N, 2)，target: (2,)
+        """
+        if sheep_positions.size == 0:
+            return 0.0
+        rel = sheep_positions.astype(np.float64) - target.astype(np.float64).reshape(1, 2)
+        e0 = float(np.max(rel[:, 0]))
+        e1 = float(np.max(rel[:, 1]))
+        e2 = float(np.max(-rel[:, 0]))
+        e3 = float(np.max(-rel[:, 1]))
+        return float((e0 + e2) * (e1 + e3))
+
+    def _sync_prev_d_hat_after_reset(self) -> None:
+        """重置后根据当前质心距目标初始化归一化距离，供势函数差分用。"""
+        r_scale = float(max(2.0 * self.scenario.world_radius, 1e-6))
+        d = float(self.scenario.get_distance_to_target())
+        self.prev_d_hat = float(np.clip(d / r_scale, 0.0, 1.0))
+
     def _compute_reward(self) -> float:
         """
-        Redesigned reward function for stable training convergence
-        
-        Design Principles:
-        ==================
-        1. SMOOTH REWARD SIGNALS: Use continuous, differentiable reward functions
-        2. PROGRESSIVE REWARDS: Encourage incremental progress toward goals
-        3. STABLE SCALING: Normalize all reward components to similar ranges
-        4. BALANCED OBJECTIVES: Balance distance, formation, and efficiency
-        5. PREDICTABLE REWARDS: Avoid discrete jumps and sparse signals
-        
-        Improvements (2026-02-17):
-        ==========================
-        - Reduced success bonus from +7.0 to +3.0 to balance reward scales
-        - Use np.tanh for progress reward to avoid sign flip penalty
-        - Relaxed reward clipping lower bound from -1.0 to -2.0
-        - Added reward smoothing mechanism
-        - Added diagnostic logging for reward components
-        
-        Reward Components:
-        ==================
-        1. Distance Progress Reward (dense, smooth)
-        2. Formation Quality Reward (stable, normalized)
-        3. Direction Alignment Reward (continuous)
-        4. Efficiency Bonus (gentle time penalty)
-        5. Success Bonus (moderate, not overwhelming)
+        稠密奖励（无机械狗几何项）：
+        - 势函数进度：w_pot * (prev_d_hat^2 - d_hat^2)，d_hat = d / (2*world_radius)
+        - 近目标：w_near * exp(-d / d0)，d0 = near_d0_alpha * (2*world_radius)
+        - 速度正则（近处更强）：-w_speed * tanh(|v_mean|/v_ref) * exp(-d/d0)
+        - 形状：四向轴对齐包络的 AABB 面积 A=(e0+e2)(e1+e3)，归一化 A/r_scale^2 后 tanh 惩罚
+        - 时间：质心距目标 < time_penalty_off_threshold_m 时为 0，否则 -time_penalty
+        系数见 self.reward_config；返回 clip 后的标量（无滑动平均）。
         """
-        reward = 0.0
-        
-        # Get current state
-        current_distance = self.scenario.get_distance_to_target()
-        max_distance = np.linalg.norm(self.world_size)
-        max_distance = max(max_distance, 1.0)
-        
-        # ========================================
-        # 1. SMOOTH DISTANCE REWARD (Core Signal)
-        # ========================================
-        # Use smooth exponential decay instead of discrete milestones
-        distance_ratio = current_distance / max_distance
-        
-        # Exponential reward: r = exp(-k * d) gives smooth, bounded reward
-        # k=3 gives reasonable decay: d=0 -> r=1.0, d=0.5 -> r=0.22, d=1.0 -> r=0.05
-        distance_reward = np.exp(-3.0 * distance_ratio)
-        reward += distance_reward * 1.0  # Scale to [0.05, 1.0]
-        
-        # ========================================
-        # 2. DISTANCE PROGRESS REWARD (Shaping)
-        # ========================================
-        # Reward for making progress toward target
-        progress_reward = 0.0
-        if self.prev_distance is not None:
-            distance_delta = self.prev_distance - current_distance
-            # Normalize by max possible progress per step
-            max_progress = 5.0 * self.dt  # Max herder speed * dt
-            progress_ratio = distance_delta / max(max_progress, 0.1)
-            # IMPROVEMENT: Use tanh instead of clip to avoid sign flip penalty
-            # tanh provides smooth transition and avoids harsh clipping
-            progress_reward = np.tanh(progress_ratio) * 0.3
-            reward += progress_reward
-        
-        self.prev_distance = current_distance
-        
-        # ========================================
-        # 3. FORMATION QUALITY REWARD (Stable)
-        # ========================================
-        # Flock spread: reward for maintaining reasonable spread
-        spread = self.scenario.get_flock_spread()
-        target_spread = 4.0  # Ideal spread
-        spread_error = abs(spread - target_spread) / max(target_spread, 1.0)
-        # Smooth penalty using exponential
-        spread_penalty = -0.1 * (1.0 - np.exp(-spread_error))
-        reward += spread_penalty
-        
-        # Flock cohesion: reward for keeping sheep together
-        # Use spread variance instead of eigenvalue ratio (more stable)
-        cohesion_bonus = 0.0
-        if spread < 8.0:  # Reasonable spread
-            cohesion_bonus = 0.1 * np.exp(-spread / 8.0)
-            reward += cohesion_bonus
-        
-        # ========================================
-        # 4. DIRECTION ALIGNMENT REWARD (Continuous)
-        # ========================================
-        flock_center = self.scenario.get_flock_center()
-        target = self.scenario.get_target_position()
-        flock_velocity = self.scenario.get_flock_direction()
-        
-        # Calculate flock speed (average velocity magnitude)
-        velocities = np.array([s.velocity for s in self.scenario.sheep])
-        mean_velocity = np.mean(velocities, axis=0)
-        flock_speed = np.linalg.norm(mean_velocity)
-        
-        # Direction alignment (continuous, not thresholded)
-        target_direction = target - flock_center
-        target_direction_norm = np.linalg.norm(target_direction)
-        
-        alignment_reward = 0.0
-        proximity_bonus = 0.0
-        if target_direction_norm > 1e-6:
-            target_unit = target_direction / target_direction_norm
-            
-            # Alignment reward: dot product of velocity and target direction
-            # This is naturally in [-1, 1] range
-            if flock_speed > 0.05:  # Lower threshold for more consistent signal
-                alignment = np.dot(flock_velocity, target_unit)
-                # Smooth alignment reward: only reward positive alignment
-                alignment_reward = max(0.0, alignment) * 0.2
-                reward += alignment_reward
-            else:
-                # Small bonus for stationary flock near target
-                if distance_ratio < 0.2:
-                    reward += 0.05
-        
-        # ========================================
-        # 5. PROXIMITY BONUS (Progressive)
-        # ========================================
-        # Smooth proximity bonus using sigmoid-like function
-        # This provides continuous reward as distance decreases
-        proximity_bonus = 0.2 / (1.0 + np.exp(10.0 * (distance_ratio - 0.3)))
-        reward += proximity_bonus
-        
-        # ========================================
-        # 6. SUCCESS BONUS (Moderate - REDUCED)
-        # ========================================
-        # IMPROVEMENT: Reduced success bonus to prevent overwhelming other signals
-        # Original: +5.0 base + +2.0 quick bonus = +7.0 total
-        # New: +2.0 base + +1.0 quick bonus = +3.0 total
-        success_bonus = 0.0
-        if self.scenario.is_flock_at_target(threshold=5.0):
-            # Moderate bonus, not too large to avoid policy collapse
-            success_bonus = 2.0  # Reduced from 5.0
-            reward += success_bonus
-            # Additional bonus for quick success
-            if self.current_step < self.episode_length * 0.5:
-                quick_bonus = 1.0  # Reduced from 2.0
-                reward += quick_bonus
-                success_bonus += quick_bonus
-        
-        # ========================================
-        # 7. EFFICIENCY PENALTY (Gentle)
-        # ========================================
-        # Very gentle time penalty to encourage efficiency
-        # Not too strong to avoid confusing the agent
-        time_penalty = -0.002
-        reward += time_penalty
-        
-        # ========================================
-        # 8. REWARD NORMALIZATION & SAFETY
-        # ========================================
-        # IMPROVEMENT: Relaxed lower bound from -1.0 to -2.0
-        # This preserves more gradient information for learning
-        # Expected range: [-1.5, 4.0] typically
-        reward = np.clip(reward, -2.0, 10.0)
-        
-        # Safety check for numerical stability
+        cfg = self.reward_config
+        r_scale = float(max(2.0 * self.scenario.world_radius, 1e-6))
+        d = float(self.scenario.get_distance_to_target())
+        d_hat = float(np.clip(d / r_scale, 0.0, 1.0))
+
+        w_pot = float(cfg.get("w_potential", 3.0))
+        r_pot = w_pot * (self.prev_d_hat ** 2 - d_hat ** 2)
+
+        alpha = float(cfg.get("near_d0_alpha", 0.15))
+        d0 = max(alpha * r_scale, 1e-3)
+        w_near = float(cfg.get("w_near", 0.35))
+        r_near = w_near * float(np.exp(-d / d0))
+
+        max_spd = float(self.scenario.sheep_config.get("max_speed", 3.0))
+        if max_spd <= 0:
+            max_spd = 1.0
+        v_ref = float(cfg.get("v_ref_scale", 1.0)) * max_spd
+        if self.scenario.sheep:
+            v_mean = np.mean(
+                np.array([s.velocity for s in self.scenario.sheep], dtype=np.float64),
+                axis=0,
+            )
+            v_mean_norm = float(np.linalg.norm(v_mean))
+        else:
+            v_mean_norm = 0.0
+        w_spd = float(cfg.get("w_speed", 0.25))
+        sigma_near = float(np.exp(-d / d0))
+        r_spd = -w_spd * float(np.tanh(v_mean_norm / max(v_ref, 1e-6))) * sigma_near
+
+        tgt = self.scenario.target_position.astype(np.float64)
+        if self.scenario.sheep:
+            pos_arr = np.array([s.position for s in self.scenario.sheep], dtype=np.float64)
+            area_bb = self._flock_axis_envelope_area(pos_arr, tgt)
+        else:
+            area_bb = 0.0
+        area_norm = float(area_bb / max(r_scale ** 2, 1e-6))
+        w_spr = float(cfg.get("w_spread", 0.12))
+        env_ref = float(cfg.get("envelope_area_ref", 0.12))
+        r_spr = -w_spr * float(np.tanh(area_norm / max(env_ref, 1e-6)))
+
+        c = float(cfg.get("time_penalty", 0.005))
+        off_m = float(cfg.get("time_penalty_off_threshold_m", 5.0))
+        if d < off_m:
+            r_time = 0.0
+        else:
+            r_time = -c
+
+        raw = r_pot + r_near + r_spd + r_spr + r_time
+        lo = float(cfg.get("reward_clip_low", -3.0))
+        hi = float(cfg.get("reward_clip_high", 5.0))
+        reward = float(np.clip(raw, lo, hi))
         if np.isnan(reward) or np.isinf(reward):
             reward = 0.0
-        
-        # ========================================
-        # 9. REWARD SMOOTHING (NEW)
-        # ========================================
-        # Apply exponential moving average smoothing
-        self.reward_history.append(reward)
-        if len(self.reward_history) > self.reward_smoothing_window:
-            self.reward_history.pop(0)
-        
-        smoothed_reward = float(np.mean(self.reward_history))
-        
-        # ========================================
-        # 10. DIAGNOSTIC LOGGING (NEW)
-        # ========================================
-        # Record reward components for analysis
+
+        self.prev_d_hat = d_hat
+
         self._reward_components = {
-            'distance_reward': float(distance_reward),
-            'progress_reward': float(progress_reward),
-            'spread_penalty': float(spread_penalty),
-            'cohesion_bonus': float(cohesion_bonus),
-            'alignment_reward': float(alignment_reward),
-            'proximity_bonus': float(proximity_bonus),
-            'success_bonus': float(success_bonus),
-            'time_penalty': float(time_penalty),
-            'raw_reward': float(reward),
-            'smoothed_reward': smoothed_reward,
+            "r_potential": float(r_pot),
+            "r_near": float(r_near),
+            "r_speed": float(r_spd),
+            "r_envelope": float(r_spr),
+            "r_time": float(r_time),
+            "envelope_area": float(area_bb),
+            "envelope_area_norm": float(area_norm),
+            "d_hat": d_hat,
+            "distance": d,
+            "raw_reward": reward,
         }
-        
-        return smoothed_reward
+        return reward
     
     def _check_done(self) -> bool:
         """检查 episode 是否结束：默认仅按步数截断，不因到达目标提前结束。"""
@@ -456,18 +455,25 @@ class SheepFlockEnv:
     
     def _get_obs(self) -> np.ndarray:
         """获取观测"""
-        return self.scenario.get_observation()
+        base = self.scenario.get_observation()
+        if not self.formation_delta_mode:
+            return base
+        return np.concatenate([base, self._formation_obs_tail()], axis=0).astype(
+            np.float32
+        )
     
     def _get_info(self) -> Dict[str, Any]:
         """获取额外信息"""
-        return {
+        info: Dict[str, Any] = {
             'step': self.current_step,
             'distance_to_target': self.scenario.get_distance_to_target(),
             'flock_spread': self.scenario.get_flock_spread(),
             'is_success': self.scenario.is_flock_at_target(threshold=5.0),
-            'flock_state': self.scenario.get_flock_state(),
             'reward_components': getattr(self, '_reward_components', {}),
         }
+        if self.info_include_flock_state:
+            info['flock_state'] = self.scenario.get_flock_state()
+        return info
     
     def render(self, mode: str = 'human') -> Optional[np.ndarray]:
         """
@@ -490,26 +496,46 @@ class SheepFlockEnv:
         print(f"Herder positions: {self.scenario.get_herder_positions()}")
     
     def _render_rgb_array(self) -> np.ndarray:
-        """生成RGB图像"""
+        """生成RGB图像（圆心在原点，图像中心为 (0,0)）"""
         img_size = 400
-        scale = img_size / max(self.world_size)
-        
+        R = float(max(self.scenario.world_radius, 1e-6))
+        pad = 20
+        span = max(img_size - 2 * pad, 1)
+        scale = span / (2.0 * R)
+        cx = img_size / 2.0
+        cy = img_size / 2.0
+
+        def to_px(p: np.ndarray) -> Tuple[int, int]:
+            return int(cx + float(p[0]) * scale), int(cy - float(p[1]) * scale)
+
         img = np.ones((img_size, img_size, 3), dtype=np.uint8) * 240
         
         target = self.scenario.get_target_position()
-        tx, ty = int(target[0] * scale), int(target[1] * scale)
-        img[max(0, ty-10):min(img_size, ty+10), max(0, tx-10):min(img_size, tx+10)] = [0, 200, 0]
+        tx, ty = to_px(target)
+        img[max(0, ty - 10):min(img_size, ty + 10), max(0, tx - 10):min(img_size, tx + 10)] = [
+            0,
+            200,
+            0,
+        ]
         
         flock_state = self.scenario.get_flock_state()
         for pos in flock_state['positions']:
-            px, py = int(pos[0] * scale), int(pos[1] * scale)
+            px, py = to_px(pos)
             if 0 <= px < img_size and 0 <= py < img_size:
-                img[max(0, py-3):min(img_size, py+3), max(0, px-3):min(img_size, px+3)] = [200, 200, 200]
+                img[max(0, py - 3):min(img_size, py + 3), max(0, px - 3):min(img_size, px + 3)] = [
+                    200,
+                    200,
+                    200,
+                ]
         
         for hpos in self.scenario.get_herder_positions():
-            hx, hy = int(hpos[0] * scale), int(hpos[1] * scale)
+            hx, hy = to_px(hpos)
             if 0 <= hx < img_size and 0 <= hy < img_size:
-                img[max(0, hy-5):min(img_size, hy+5), max(0, hx-5):min(img_size, hx+5)] = [0, 0, 200]
+                img[max(0, hy - 5):min(img_size, hy + 5), max(0, hx - 5):min(img_size, hx + 5)] = [
+                    0,
+                    0,
+                    200,
+                ]
         
         return img
     
@@ -531,6 +557,9 @@ class SheepFlockEnv:
             'action_dim': self.action_dim,
             'episode_length': self.episode_length,
             'world_size': self.world_size,
+            'world_radius': float(self.scenario.world_radius),
+            'formation_delta_mode': self.formation_delta_mode,
+            'high_level_interval': self.high_level_interval,
         }
 
 

@@ -20,11 +20,7 @@ class PPOActor(nn.Module):
     """
     Actor network for single-agent PPO.
     
-    Outputs formation parameters:
-    - radius_mean: Standing radius around flock center [0, 20]
-    - radius_std: Radius variation [0, 5]
-    - angle_mean: Gathering angle [-pi, pi]
-    - concentration: How concentrated the formation is [0, 1]
+    输出 5 维 ∈ [-1,1]，由 HighLevelAction 解码（见 high_level_action.py）：θ_in=a[0]·π（弧中点→羊）、R、coverage；a[3:5] 忽略。
     """
 
     def __init__(

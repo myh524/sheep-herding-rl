@@ -8,8 +8,8 @@ OUTPUT="${2:-visualization_demo.gif}"
 NUM_EPISODES="${3:-1}"
 NUM_SHEEP="${4:-6}"
 NUM_HERDERS="${5:-3}"
-WORLD_SIZE_X="${6:-30.0}"
-WORLD_SIZE_Y="${7:-30.0}"
+WORLD_SIZE_X="${6:-100.0}"
+WORLD_SIZE_Y="${7:-100.0}"
 
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
