@@ -224,7 +224,7 @@ class SheepScenario:
         
         self.boids_weights = {
             'separation': 1.0,
-            'alignment': 0.1,
+            'alignment': 0.3,
             'cohesion': 0.5,
             'evasion': 1.0,
             'boundary': 1.0,

@@ -35,9 +35,9 @@ class SheepFlockEnv:
         end_episode_when_at_target: bool = False,
         info_include_flock_state: bool = False,
         formation_delta_mode: bool = False,
-        formation_delta_theta_max_rad: float = np.pi / 16.0,
-        formation_delta_radius_max: float = 2.0,
-        formation_delta_coverage_max: float = 0.10,
+        formation_delta_theta_max_rad: float = np.pi / 32.0,
+        formation_delta_radius_max: float = 1.0,
+        formation_delta_coverage_max: float = 0.05,
         high_level_interval: Optional[int] = None,
     ):
         """
@@ -90,7 +90,7 @@ class SheepFlockEnv:
             'w_potential': 3.0,
             'w_near': 0.35,
             'near_d0_alpha': 0.15,
-            'w_speed': 0.25,
+            'w_speed': 0.40,
             'v_ref_scale': 1.0,
             'w_spread': 0.12,
             'envelope_area_ref': 0.12,

@@ -2,7 +2,7 @@
 # 可视化运行脚本
 # 加载训练好的模型并实时渲染环境
 # 默认参数
-MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260409_130824/models/model_241600.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260409_140310/models/model_9281600.pt}"
 
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
@@ -34,10 +34,10 @@ python visualize.py \
     --model_path "$MODEL_PATH" \
     --herder_teleport \
     --num_episodes 5 \
-    --num_sheep 3 \
+    --num_sheep 9 \
     --num_herders 3 \
-    --world_size 50 50 \
+    --world_size 100 100 \
     --episode_length 200 \
-    --render_delay 200 \
+    --render_delay 100 \
     --formation_delta \
     "${EXTRA[@]}"
