@@ -16,7 +16,7 @@ from typing import Dict, Any, Tuple
 from envs.sheep_scenario import world_radius_from_size
 
 # 站位半径全局统一（课程 / 随机化 / 基类环境均使用同一区间）
-STANCE_RADIUS_MIN = 5.0
+STANCE_RADIUS_MIN = 6.0
 STANCE_RADIUS_MAX = 20.0
 
 

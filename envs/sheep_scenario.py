@@ -6,6 +6,13 @@ SheepScenario: 羊群引导场景管理类
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 
+from envs.defaults import (
+    DEFAULT_NUM_HERDERS,
+    DEFAULT_NUM_SHEEP,
+    DEFAULT_WORLD_SIZE,
+    default_boids_weights,
+    default_sheep_config,
+)
 from envs.sheep_entity import SheepEntity
 
 
@@ -182,9 +189,9 @@ class SheepScenario:
 
     def __init__(
         self,
-        world_size: Tuple[float, float] = (100.0, 100.0),
-        num_sheep: int = 10,
-        num_herders: int = 3,
+        world_size: Tuple[float, float] = DEFAULT_WORLD_SIZE,
+        num_sheep: int = DEFAULT_NUM_SHEEP,
+        num_herders: int = DEFAULT_NUM_HERDERS,
         target_position: Optional[np.ndarray] = None,
         sheep_config: Optional[Dict[str, Any]] = None,
         random_seed: Optional[int] = None,
@@ -209,26 +216,13 @@ class SheepScenario:
         self.num_sheep = num_sheep
         self.num_herders = num_herders
         
-        self.sheep_config = sheep_config or {
-            'max_speed': 2.0,
-            'max_force': 0.3,
-            'perception_radius': 30.0,
-            'separation_radius': 3.0,
-            'velocity_drag': 0.55,
-            'evasion_radius': 5.0,
-        }
+        self.sheep_config = sheep_config or default_sheep_config()
         
         self.sheep: List[SheepEntity] = []
         self.herder_positions: np.ndarray = np.zeros((num_herders, 2), dtype=np.float32)
         self.target_position = np.zeros(2, dtype=np.float32)
         
-        self.boids_weights = {
-            'separation': 1.0,
-            'alignment': 0.3,
-            'cohesion': 0.5,
-            'evasion': 1.0,
-            'boundary': 1.0,
-        }
+        self.boids_weights = default_boids_weights()
         # 向量化 Boids 与 SheepEntity 行为对齐；False 时回退逐羊 Python 循环（调试用）
         self.vectorized_sheep_updates = True
         

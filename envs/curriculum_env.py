@@ -7,6 +7,19 @@ import numpy as np
 from typing import Tuple, Dict, Any, Optional, List
 from gym import spaces
 
+from envs.defaults import (
+    DEFAULT_CURRICULUM_STAGE_SPECS,
+    DEFAULT_DT,
+    DEFAULT_FLOCK_EPISODE_LENGTH,
+    DEFAULT_RANDOMIZED_NUM_HERDERS_RANGE,
+    DEFAULT_RANDOMIZED_NUM_SHEEP_RANGE,
+    DEFAULT_RANDOMIZED_SHEEP_SPEED_RANGE,
+    DEFAULT_RANDOMIZED_WORLD_SIZE_RANGE,
+    FORMATION_DELTA_COVERAGE_MAX,
+    FORMATION_DELTA_RADIUS_MAX,
+    FORMATION_DELTA_THETA_MAX_RAD,
+    randomized_sheep_config,
+)
 from envs.sheep_flock import SheepFlockEnv
 from envs.sheep_scenario import sample_random_target_position
 from envs.high_level_action import HighLevelAction
@@ -55,49 +68,23 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
     """
     
     DEFAULT_STAGES = [
-        CurriculumStage(
-            name='Stage 0: Simple',
-            num_sheep=3,
-            num_herders=3,
-            world_size=(70.0,70.0),
-            episode_length=200,
-            target_success_rate=0.8,
-            min_episodes=50,
-        ),
-        CurriculumStage(
-            name='Stage 1: Medium',
-            num_sheep=6,
-            num_herders=3,
-            world_size=(70.0, 70.0),
-            episode_length=200,
-            target_success_rate=0.7,
-            min_episodes=100,
-        ),
-        CurriculumStage(
-            name='Stage 2: Target',
-            num_sheep=10,
-            num_herders=3,
-            world_size=(100.0, 100.0),
-            episode_length=200,
-            target_success_rate=0.6,
-            min_episodes=200,
-        ),
+        CurriculumStage(**spec) for spec in DEFAULT_CURRICULUM_STAGE_SPECS
     ]
     
     def __init__(
         self,
         stages: Optional[List[CurriculumStage]] = None,
         start_stage: int = 0,
-        dt: float = 2.0,
+        dt: float = DEFAULT_DT,
         random_seed: Optional[int] = None,
         auto_advance: bool = True,
         use_herder_kinematics: bool = True,
         end_episode_when_at_target: bool = False,
         info_include_flock_state: bool = False,
         formation_delta_mode: bool = False,
-        formation_delta_theta_max_rad: float = np.pi / 8.0,
-        formation_delta_radius_max: float = 3.0,
-        formation_delta_coverage_max: float = 0.15,
+        formation_delta_theta_max_rad: float = FORMATION_DELTA_THETA_MAX_RAD,
+        formation_delta_radius_max: float = FORMATION_DELTA_RADIUS_MAX,
+        formation_delta_coverage_max: float = FORMATION_DELTA_COVERAGE_MAX,
         high_level_interval: Optional[int] = None,
     ):
         """
@@ -304,20 +291,20 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
     
     def __init__(
         self,
-        num_sheep_range: Tuple[int, int] = (5, 15),
-        num_herders_range: Tuple[int, int] = (2, 4),
-        world_size_range: Tuple[Tuple[float, float], Tuple[float, float]] = ((100.0, 100.0), (100.0, 100.0)),
-        sheep_speed_range: Tuple[float, float] = (0.5, 1.5),
-        episode_length: int = 100,
-        dt: float = 2.0,
+        num_sheep_range: Tuple[int, int] = DEFAULT_RANDOMIZED_NUM_SHEEP_RANGE,
+        num_herders_range: Tuple[int, int] = DEFAULT_RANDOMIZED_NUM_HERDERS_RANGE,
+        world_size_range: Tuple[Tuple[float, float], Tuple[float, float]] = DEFAULT_RANDOMIZED_WORLD_SIZE_RANGE,
+        sheep_speed_range: Tuple[float, float] = DEFAULT_RANDOMIZED_SHEEP_SPEED_RANGE,
+        episode_length: int = DEFAULT_FLOCK_EPISODE_LENGTH,
+        dt: float = DEFAULT_DT,
         random_seed: Optional[int] = None,
         use_herder_kinematics: bool = True,
         end_episode_when_at_target: bool = False,
         info_include_flock_state: bool = False,
         formation_delta_mode: bool = False,
-        formation_delta_theta_max_rad: float = np.pi / 8.0,
-        formation_delta_radius_max: float = 3.0,
-        formation_delta_coverage_max: float = 0.15,
+        formation_delta_theta_max_rad: float = FORMATION_DELTA_THETA_MAX_RAD,
+        formation_delta_radius_max: float = FORMATION_DELTA_RADIUS_MAX,
+        formation_delta_coverage_max: float = FORMATION_DELTA_COVERAGE_MAX,
         high_level_interval: Optional[int] = None,
     ):
         """
@@ -401,12 +388,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             world_size=self.world_size,
             num_sheep=self.num_sheep,
             num_herders=self.num_herders,
-            sheep_config={
-                'max_speed': sheep_speed,
-                'max_force': 0.1,
-                'perception_radius': 5.0,
-                'separation_radius': 2.0,
-            },
+            sheep_config=randomized_sheep_config(sheep_speed),
             use_herder_kinematics=self.scenario.use_herder_kinematics,
         )
         

@@ -132,6 +132,15 @@ def _matplotlib_is_interactive() -> bool:
 from dataclasses import dataclass
 
 from envs import SheepFlockEnv
+from envs.defaults import (
+    DEFAULT_NUM_HERDERS,
+    DEFAULT_NUM_SHEEP,
+    DEFAULT_VIS_EPISODE_LENGTH,
+    DEFAULT_WORLD_SIZE_ARGV,
+    FORMATION_DELTA_COVERAGE_MAX,
+    FORMATION_DELTA_RADIUS_MAX,
+    FORMATION_DELTA_THETA_MAX_DEG,
+)
 from onpolicy.algorithms.ppo_actor_critic import PPOActorCritic, ImprovedActorCritic
 
 
@@ -155,16 +164,16 @@ def parse_args():
     parser.add_argument('--num_episodes', type=int, default=5)
     parser.add_argument('--render_delay', type=int, default=30)
     
-    parser.add_argument('--num_sheep', type=int, default=10)
-    parser.add_argument('--num_herders', type=int, default=3)
+    parser.add_argument('--num_sheep', type=int, default=DEFAULT_NUM_SHEEP)
+    parser.add_argument('--num_herders', type=int, default=DEFAULT_NUM_HERDERS)
     parser.add_argument(
         '--world_size',
         type=float,
         nargs=2,
-        default=[100.0, 100.0],
+        default=list(DEFAULT_WORLD_SIZE_ARGV),
         help='场地 (W,H)：圆形半径 R=min/2，目标在圆心',
     )
-    parser.add_argument('--episode_length', type=int, default=150)
+    parser.add_argument('--episode_length', type=int, default=DEFAULT_VIS_EPISODE_LENGTH)
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument(
         '--herder_teleport',
@@ -181,10 +190,18 @@ def parse_args():
     parser.add_argument(
         '--formation_delta_theta_max_deg',
         type=float,
-        default=22.5,
+        default=FORMATION_DELTA_THETA_MAX_DEG,
     )
-    parser.add_argument('--formation_delta_radius_max', type=float, default=3.0)
-    parser.add_argument('--formation_delta_coverage_max', type=float, default=0.15)
+    parser.add_argument(
+        '--formation_delta_radius_max',
+        type=float,
+        default=FORMATION_DELTA_RADIUS_MAX,
+    )
+    parser.add_argument(
+        '--formation_delta_coverage_max',
+        type=float,
+        default=FORMATION_DELTA_COVERAGE_MAX,
+    )
     parser.add_argument(
         '--high_level_interval',
         type=int,

@@ -2,7 +2,7 @@
 # 可视化运行脚本
 # 加载训练好的模型并实时渲染环境
 # 默认参数
-MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260409_140310/models/model_9281600.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_164604/models/model_561600.pt}"
 
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then

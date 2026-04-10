@@ -6,6 +6,17 @@ SheepFlockEnv: 羊群引导强化学习环境
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional, Union
 from gym import spaces
+from envs.defaults import (
+    DEFAULT_DT,
+    DEFAULT_FLOCK_EPISODE_LENGTH,
+    DEFAULT_NUM_HERDERS,
+    DEFAULT_NUM_SHEEP,
+    DEFAULT_WORLD_SIZE,
+    FORMATION_DELTA_COVERAGE_MAX,
+    FORMATION_DELTA_RADIUS_MAX,
+    FORMATION_DELTA_THETA_MAX_RAD,
+    default_reward_config,
+)
 from envs.sheep_scenario import SheepScenario, clip_position_to_disk
 from envs.high_level_action import (
     HighLevelAction,
@@ -24,20 +35,20 @@ class SheepFlockEnv:
     
     def __init__(
         self,
-        world_size: Tuple[float, float] = (100.0, 100.0),
-        num_sheep: int = 10,
-        num_herders: int = 3,
-        episode_length: int = 100,
-        dt: float = 2.0,
+        world_size: Tuple[float, float] = DEFAULT_WORLD_SIZE,
+        num_sheep: int = DEFAULT_NUM_SHEEP,
+        num_herders: int = DEFAULT_NUM_HERDERS,
+        episode_length: int = DEFAULT_FLOCK_EPISODE_LENGTH,
+        dt: float = DEFAULT_DT,
         reward_config: Optional[Dict[str, float]] = None,
         random_seed: Optional[int] = None,
         use_herder_kinematics: bool = True,
         end_episode_when_at_target: bool = False,
         info_include_flock_state: bool = False,
         formation_delta_mode: bool = False,
-        formation_delta_theta_max_rad: float = np.pi / 32.0,
-        formation_delta_radius_max: float = 1.0,
-        formation_delta_coverage_max: float = 0.05,
+        formation_delta_theta_max_rad: float = FORMATION_DELTA_THETA_MAX_RAD,
+        formation_delta_radius_max: float = FORMATION_DELTA_RADIUS_MAX,
+        formation_delta_coverage_max: float = FORMATION_DELTA_COVERAGE_MAX,
         high_level_interval: Optional[int] = None,
     ):
         """
@@ -86,19 +97,7 @@ class SheepFlockEnv:
             self.high_level_interval = max(1, int(high_level_interval))
         self.step_count = 0
         
-        self.reward_config = reward_config or {
-            'w_potential': 3.0,
-            'w_near': 0.35,
-            'near_d0_alpha': 0.15,
-            'w_speed': 0.40,
-            'v_ref_scale': 1.0,
-            'w_spread': 0.12,
-            'envelope_area_ref': 0.12,
-            'time_penalty': 0.005,
-            'time_penalty_off_threshold_m': 5.0,
-            'reward_clip_low': -3.0,
-            'reward_clip_high': 5.0,
-        }
+        self.reward_config = reward_config or default_reward_config()
         
         self.scenario = SheepScenario(
             world_size=world_size,

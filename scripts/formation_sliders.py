@@ -28,10 +28,9 @@ from matplotlib.widgets import Slider
 
 from typing import Tuple
 
+from envs.defaults import DEFAULT_WORLD_SIZE_ARGV
 from envs.high_level_action import HighLevelAction
 from envs.sheep_scenario import world_radius_from_size
-
-DEFAULT_WORLD_SIZE: Tuple[float, float] = (100.0, 100.0)
 
 FLOCK_CENTER = np.zeros(2, dtype=np.float32)
 
@@ -194,7 +193,7 @@ def main():
         "--world_size",
         type=float,
         nargs=2,
-        default=[DEFAULT_WORLD_SIZE[0], DEFAULT_WORLD_SIZE[1]],
+        default=list(DEFAULT_WORLD_SIZE_ARGV),
         metavar=("W", "H"),
         help="与 train_ppo 相同语义；圆半径 R=min(W,H)/2",
     )

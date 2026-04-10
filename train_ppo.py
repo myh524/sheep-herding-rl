@@ -24,10 +24,19 @@ _TB_REWARD_COMPONENTS = frozenset({
     'd_hat',
 })
 
-from envs import SheepFlockEnv
 from onpolicy.algorithms.ppo_actor_critic import PPOActorCritic
 from onpolicy.utils.ppo_buffer import PPOReplayBuffer
 from onpolicy.utils.reward_normalizer import RunningMeanStd
+
+from envs.defaults import (
+    DEFAULT_NUM_HERDERS,
+    DEFAULT_NUM_SHEEP,
+    DEFAULT_TRAIN_EPISODE_LENGTH,
+    DEFAULT_WORLD_SIZE_ARGV,
+    FORMATION_DELTA_COVERAGE_MAX,
+    FORMATION_DELTA_RADIUS_MAX,
+    FORMATION_DELTA_THETA_MAX_DEG,
+)
 
 
 class SimpleLogger:
@@ -170,14 +179,14 @@ def parse_args():
     parser.add_argument('--env_name', type=str, default='sheep_herding')
     parser.add_argument('--scenario_name', type=str, default='default')
 
-    parser.add_argument('--num_sheep', type=int, default=10)
-    parser.add_argument('--num_herders', type=int, default=3)
-    parser.add_argument('--episode_length', type=int, default=150)
+    parser.add_argument('--num_sheep', type=int, default=DEFAULT_NUM_SHEEP)
+    parser.add_argument('--num_herders', type=int, default=DEFAULT_NUM_HERDERS)
+    parser.add_argument('--episode_length', type=int, default=DEFAULT_TRAIN_EPISODE_LENGTH)
     parser.add_argument(
         '--world_size',
         type=float,
         nargs=2,
-        default=[100.0, 100.0],
+        default=list(DEFAULT_WORLD_SIZE_ARGV),
         help='场地 (W,H)：圆形半径 R=min(W,H)/2，目标在圆心 (0,0)',
     )
     
@@ -208,19 +217,19 @@ def parse_args():
     parser.add_argument(
         '--formation_delta_theta_max_deg',
         type=float,
-        default=22.5,
+        default=FORMATION_DELTA_THETA_MAX_DEG,
         help='增量模式下 |a[0]|=1 时每档高层决策的最大 Δθ（度）',
     )
     parser.add_argument(
         '--formation_delta_radius_max',
         type=float,
-        default=3.0,
+        default=FORMATION_DELTA_RADIUS_MAX,
         help='增量模式下 |a[1]|=1 时每档最大 ΔR（米）',
     )
     parser.add_argument(
         '--formation_delta_coverage_max',
         type=float,
-        default=0.15,
+        default=FORMATION_DELTA_COVERAGE_MAX,
         help='增量模式下 |a[2]|=1 时每档最大 Δcoverage',
     )
     parser.add_argument(
