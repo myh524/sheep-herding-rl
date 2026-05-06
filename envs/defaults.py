@@ -179,13 +179,13 @@ _DEFAULT_HERDER_MOTION: Dict[str, Any] = {
     # min_cost：当前位置到弧槽总路程最小；ordered：下标 i 对应槽位 i
     "herder_slot_assignment": "min_cost",
     "k_attract": 1.0,
-    "flock_repel_spread_scale": 2.5,
+    "flock_repel_spread_scale": 6.0,
     "flock_repel_offset": 3.0,
     "flock_repel_gain": 4.0,
     "herder_peer_repel_radius": 4.0,
     "herder_peer_repel_gain": 1.0,
     # 每步位移上限 v_max*dt；原为 5.0，现为五分之一
-    "herder_max_speed": 0.5,
+    "herder_max_speed": 0.7,
     "herder_target_reach_eps": 0.1,
     "herder_move_min_norm": 0.1,
 }
