@@ -3,14 +3,18 @@ SheepScenario: 羊群引导场景管理类
 管理羊群、机械狗、目标位置等场景元素
 """
 
-import numpy as np
+import copy
 from typing import List, Tuple, Optional, Dict, Any
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from envs.defaults import (
     DEFAULT_NUM_HERDERS,
     DEFAULT_NUM_SHEEP,
     DEFAULT_WORLD_SIZE,
     default_boids_weights,
+    default_herder_motion_config,
     default_sheep_config,
 )
 from envs.sheep_entity import SheepEntity
@@ -143,6 +147,39 @@ def clip_position_to_disk(
     return p
 
 
+def assign_herders_to_slots(
+    herder_positions: np.ndarray,
+    slots: np.ndarray,
+    assignment_mode: str,
+) -> np.ndarray:
+    """
+    将弧上槽位分配给各牧者。
+
+    Args:
+        herder_positions: (N, 2)
+        slots: (N, 2) 编队槽位，顺序为弧上索引
+        assignment_mode: "ordered" 或 "min_cost"
+
+    Returns:
+        (N, 2)，第 i 行为牧者 i 应前往的目标（已分配）
+    """
+    slots = np.asarray(slots, dtype=np.float32)
+    n = int(slots.shape[0])
+    if n <= 0:
+        return slots.copy()
+    if str(assignment_mode) != "min_cost":
+        return slots.copy()
+    H = np.asarray(herder_positions, dtype=np.float64).reshape(n, 2)
+    S = np.asarray(slots, dtype=np.float64).reshape(n, 2)
+    diff = H[:, np.newaxis, :] - S[np.newaxis, :, :]
+    cost = np.linalg.norm(diff, axis=2)
+    row_ind, col_ind = linear_sum_assignment(cost)
+    out = np.zeros_like(S)
+    for k in range(n):
+        out[int(row_ind[k])] = S[int(col_ind[k])]
+    return out.astype(np.float32)
+
+
 def _boids_boundary_disk_batch(
     positions: np.ndarray,
     world_radius: float,
@@ -196,6 +233,7 @@ class SheepScenario:
         sheep_config: Optional[Dict[str, Any]] = None,
         random_seed: Optional[int] = None,
         use_herder_kinematics: bool = True,
+        herder_motion: Optional[Dict[str, Any]] = None,
     ):
         """
         Args:
@@ -206,6 +244,7 @@ class SheepScenario:
             sheep_config: 羊的配置参数
             random_seed: 随机种子
             use_herder_kinematics: False 时机械狗每步直接置于编队目标点（无运动学），便于调试高层队形
+            herder_motion: 覆盖默认机械狗运动/分配参数（见 envs.defaults.default_herder_motion_config）
         """
         if random_seed is not None:
             np.random.seed(random_seed)
@@ -215,6 +254,10 @@ class SheepScenario:
         self.world_radius = world_radius_from_size(world_size)
         self.num_sheep = num_sheep
         self.num_herders = num_herders
+
+        self._hm: Dict[str, Any] = default_herder_motion_config()
+        if herder_motion:
+            self._hm.update(copy.deepcopy(herder_motion))
         
         self.sheep_config = sheep_config or default_sheep_config()
         
@@ -279,17 +322,31 @@ class SheepScenario:
             self.sheep.append(sheep)
     
     def _init_herders(self):
-        """在圆周内侧初始化机械狗（默认在 π 方向附近排开）。"""
-        self.herder_positions = np.zeros((self.num_herders, 2), dtype=np.float32)
-        R = float(self.world_radius)
-        base_r = 0.62 * R
+        """机械狗初始位置：random_disk 或 fixed_arc（π 侧弧，旧默认）。"""
         n = self.num_herders
+        self.herder_positions = np.zeros((n, 2), dtype=np.float32)
+        R = float(self.world_radius)
+        mode = str(self._hm.get("herder_init_mode", "random_disk"))
+        if mode == "fixed_arc":
+            base_r = 0.62 * R
+            for i in range(n):
+                ang = float(np.pi + (i - (n - 1) / 2.0) * 0.4)
+                p = np.array(
+                    [np.cos(ang) * base_r, np.sin(ang) * base_r], dtype=np.float32
+                )
+                self.herder_positions[i] = clip_position_to_disk(p, R - 0.5)
+            return
+        margin = float(self._hm.get("herder_init_margin", 0.5))
+        r_min_frac = float(self._hm.get("herder_init_r_min_frac", 0.12))
+        r_min = float(np.clip(r_min_frac * R, 0.05, R * 0.9))
+        r_max = float(max(R - margin, r_min + 1e-2))
         for i in range(n):
-            ang = float(np.pi + (i - (n - 1) / 2.0) * 0.4)
-            p = np.array(
-                [np.cos(ang) * base_r, np.sin(ang) * base_r], dtype=np.float32
-            )
-            self.herder_positions[i] = clip_position_to_disk(p, R - 0.5)
+            ang = float(np.random.uniform(0.0, 2.0 * np.pi))
+            u = float(np.random.uniform(0.0, 1.0))
+            r_sq = u * (r_max * r_max - r_min * r_min) + r_min * r_min
+            r = float(np.sqrt(max(r_sq, 0.0)))
+            p = np.array([np.cos(ang) * r, np.sin(ang) * r], dtype=np.float32)
+            self.herder_positions[i] = clip_position_to_disk(p, R)
     
     def _init_target(self):
         """目标固定在圆心。"""
@@ -317,21 +374,25 @@ class SheepScenario:
     
     def set_herder_targets(self, targets: np.ndarray):
         """
-        设置机械狗的目标位置
-        
+        设置机械狗的目标位置（先对槽位做最优分配，再写入 herder_targets[i]）。
+
         Args:
-            targets: 目标位置数组，形状为 (num_herders, 2)
+            targets: 编队槽位 (num_herders, 2)，顺序为弧上槽位索引
         """
-        targets = np.array(targets, dtype=np.float32)
-        self.herder_targets = targets.copy()
+        slots = np.asarray(targets, dtype=np.float32)
+        n = self.num_herders
+        if slots.shape[0] != n:
+            raise ValueError(
+                f"targets 行数 {slots.shape[0]} 与 num_herders={n} 不一致"
+            )
+        mode = str(self._hm.get("herder_slot_assignment", "min_cost"))
+        self.herder_targets = assign_herders_to_slots(
+            self.herder_positions, slots, mode
+        ).copy()
     
     def update_herders(self, dt: float = 2.0):
         """
-        更新机械狗位置（向目标移动，自动避开羊群）
-        
-        使用势场法：
-        - 目标点产生吸引力
-        - 羊群产生排斥力（当距离过近时）
+        更新机械狗位置：目标吸引 + 可选牧者间斥力 + 羊群质心斥力，再按最大速度积分。
         
         Args:
             dt: 时间步长
@@ -346,7 +407,17 @@ class SheepScenario:
                 ).astype(np.float32)
             return
         
-        # 一次堆叠位置，避免 get_flock_center / get_flock_spread 各扫一遍羊群
+        hm = self._hm
+        k_attract = float(hm.get("k_attract", 1.0))
+        f_spread = float(hm.get("flock_repel_spread_scale", 2.5))
+        f_off = float(hm.get("flock_repel_offset", 3.0))
+        f_gain = float(hm.get("flock_repel_gain", 1.5))
+        peer_r = float(hm.get("herder_peer_repel_radius", 4.0))
+        peer_g = float(hm.get("herder_peer_repel_gain", 1.0))
+        v_max = float(hm.get("herder_max_speed", 5.0))
+        reach_eps = float(hm.get("herder_target_reach_eps", 0.1))
+        move_min = float(hm.get("herder_move_min_norm", 0.1))
+
         if self.sheep:
             pos_arr = np.asarray([s.position for s in self.sheep], dtype=np.float32)
             flock_center = np.mean(pos_arr, axis=0).astype(np.float32)
@@ -359,35 +430,61 @@ class SheepScenario:
         else:
             flock_center = np.zeros(2, dtype=np.float32)
             flock_spread = 0.0
-        avoid_radius = float(flock_spread * 2.5 + 3.0)
-        
+        avoid_radius = float(flock_spread * f_spread + f_off)
+
+        H = self.herder_positions
+
         for i in range(self.num_herders):
             current_pos = self.herder_positions[i]
             target_pos = self.herder_targets[i]
-            
+
             to_target = target_pos - current_pos
-            target_dist = np.linalg.norm(to_target)
-            
-            if target_dist < 0.1:
+            target_dist = float(np.linalg.norm(to_target))
+
+            if target_dist < reach_eps:
+                self.herder_positions[i] = clip_position_to_disk(
+                    self.herder_positions[i], self.world_radius
+                ).astype(np.float32)
                 continue
-            
-            attract_force = to_target / target_dist
-            
+
+            attract_force = (to_target / np.float32(target_dist)) * np.float32(k_attract)
+
             to_flock = current_pos - flock_center
-            flock_dist = np.linalg.norm(to_flock)
-            
+            flock_dist = float(np.linalg.norm(to_flock))
+
             repel_force = np.zeros(2, dtype=np.float32)
             if flock_dist < avoid_radius and flock_dist > 0.1:
-                repel_strength = (avoid_radius - flock_dist) / avoid_radius
-                repel_force = (to_flock / flock_dist) * repel_strength * 1.5
-            
-            move_direction = attract_force + repel_force
-            move_norm = np.linalg.norm(move_direction)
-            
-            if move_norm > 0.1:
-                move_direction = move_direction / move_norm
-                self.herder_positions[i] += move_direction * min(5.0 * dt, target_dist)
-            
+                repel_strength = (avoid_radius - flock_dist) / max(avoid_radius, 1e-6)
+                repel_force = (
+                    (to_flock / np.float32(flock_dist))
+                    * np.float32(repel_strength * f_gain)
+                ).astype(np.float32)
+
+            peer_force = np.zeros(2, dtype=np.float32)
+            if peer_g != 0.0 and peer_r > 0.0:
+                for j in range(self.num_herders):
+                    if j == i:
+                        continue
+                    diff_ij = current_pos - H[j]
+                    dij = float(np.linalg.norm(diff_ij))
+                    if dij < peer_r and dij > 1e-6:
+                        w = (1.0 - dij / peer_r) ** 2
+                        peer_force += (
+                            (diff_ij / np.float32(dij)) * np.float32(peer_g * w)
+                        ).astype(np.float32)
+
+            move_direction = attract_force + repel_force + peer_force
+            move_norm = float(np.linalg.norm(move_direction))
+
+            if move_norm > move_min:
+                move_direction = (move_direction / np.float32(move_norm)).astype(
+                    np.float32
+                )
+                step = min(v_max * float(dt), target_dist)
+                self.herder_positions[i] = (
+                    self.herder_positions[i] + move_direction * np.float32(step)
+                ).astype(np.float32)
+
             self.herder_positions[i] = clip_position_to_disk(
                 self.herder_positions[i], self.world_radius
             ).astype(np.float32)
@@ -803,5 +900,7 @@ class SheepScenario:
             f"num_sheep={self.num_sheep}, "
             f"num_herders={self.num_herders}, "
             f"use_herder_kinematics={self.use_herder_kinematics}, "
+            f"herder_init_mode={self._hm.get('herder_init_mode')}, "
+            f"herder_slot_assignment={self._hm.get('herder_slot_assignment')}, "
             f"target={self.target_position})"
         )

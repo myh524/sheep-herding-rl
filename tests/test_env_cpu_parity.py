@@ -1,6 +1,7 @@
 """观测快照与向量化 Boids 相对 legacy 的数值一致性。"""
 import numpy as np
 
+from envs.defaults import HERDER_PHYSICS_LEGACY_OVERRIDES
 from envs.sheep_scenario import SheepScenario
 
 
@@ -97,6 +98,7 @@ def test_observation_snapshot_matches_reference():
         num_herders=3,
         random_seed=42,
         use_herder_kinematics=True,
+        herder_motion=dict(HERDER_PHYSICS_LEGACY_OVERRIDES),
     )
     s.reset(target_position=None)
     for _ in range(15):

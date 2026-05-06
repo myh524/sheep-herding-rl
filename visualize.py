@@ -182,6 +182,24 @@ def parse_args():
         help='机械狗直接瞬移到编队目标（关闭运动学），与 train_ppo --herder_teleport 一致',
     )
     parser.add_argument(
+        '--herder_physics_legacy',
+        action='store_true',
+        default=False,
+        help='与 train_ppo --herder_physics_legacy 一致',
+    )
+    parser.add_argument(
+        '--herder_init',
+        type=str,
+        default=None,
+        choices=['random_disk', 'fixed_arc'],
+    )
+    parser.add_argument(
+        '--herder_assignment',
+        type=str,
+        default=None,
+        choices=['min_cost', 'ordered'],
+    )
+    parser.add_argument(
         '--formation_delta',
         action='store_true',
         default=False,
@@ -821,6 +839,15 @@ def main():
         )
     if getattr(args, "high_level_interval", None) is not None:
         extra_kw["high_level_interval"] = int(args.high_level_interval)
+    if getattr(args, "herder_physics_legacy", False):
+        extra_kw["herder_physics_legacy"] = True
+    hm = {}
+    if getattr(args, "herder_init", None):
+        hm["herder_init_mode"] = str(args.herder_init)
+    if getattr(args, "herder_assignment", None):
+        hm["herder_slot_assignment"] = str(args.herder_assignment)
+    if hm:
+        extra_kw["herder_motion"] = hm
     env = SheepFlockEnv(
         world_size=tuple(args.world_size),
         num_sheep=args.num_sheep,

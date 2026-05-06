@@ -203,6 +203,26 @@ def parse_args():
         help='机械狗每步直接置于编队目标点，关闭运动学（先验队形效果；后续可再训低层运动）',
     )
     parser.add_argument(
+        '--herder_physics_legacy',
+        action='store_true',
+        default=False,
+        help='旧版机械狗物理：π 侧固定初值、槽位按序分配、无牧者间斥力（与旧 checkpoint 分布对齐）',
+    )
+    parser.add_argument(
+        '--herder_init',
+        type=str,
+        default=None,
+        choices=['random_disk', 'fixed_arc'],
+        help='牧者初始位置：random_disk 圆环均匀；fixed_arc π 侧弧（默认随环境，见 envs.defaults）',
+    )
+    parser.add_argument(
+        '--herder_assignment',
+        type=str,
+        default=None,
+        choices=['min_cost', 'ordered'],
+        help='编队槽位分配：min_cost 匈牙利最小总路程；ordered 下标 i 对弧点 i',
+    )
+    parser.add_argument(
         '--end_episode_when_at_target',
         action='store_true',
         default=False,
@@ -362,6 +382,15 @@ def _extra_sheep_env_kwargs(args) -> Dict[str, Any]:
         kw["formation_delta_coverage_max"] = float(args.formation_delta_coverage_max)
     if getattr(args, "high_level_interval", None) is not None:
         kw["high_level_interval"] = int(args.high_level_interval)
+    if getattr(args, "herder_physics_legacy", False):
+        kw["herder_physics_legacy"] = True
+    hm: Dict[str, Any] = {}
+    if getattr(args, "herder_init", None):
+        hm["herder_init_mode"] = str(args.herder_init)
+    if getattr(args, "herder_assignment", None):
+        hm["herder_slot_assignment"] = str(args.herder_assignment)
+    if hm:
+        kw["herder_motion"] = hm
     return kw
 
 

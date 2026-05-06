@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -165,3 +165,55 @@ def default_sheep_config() -> Dict[str, Any]:
 def default_boids_weights() -> Dict[str, float]:
     """返回默认 Boids 权重的深拷贝。"""
     return copy.deepcopy(_DEFAULT_BOIDS_WEIGHTS)
+
+
+# ---------------------------------------------------------------------------
+# 机械狗：初始化、槽位分配（匈牙利）、势场运动学（与 SheepScenario 一致）
+# ---------------------------------------------------------------------------
+
+_DEFAULT_HERDER_MOTION: Dict[str, Any] = {
+    # random_disk：圆环内均匀面积采样；fixed_arc：π 侧弧排布（旧行为）
+    "herder_init_mode": "random_disk",
+    "herder_init_margin": 0.5,
+    "herder_init_r_min_frac": 0.12,
+    # min_cost：当前位置到弧槽总路程最小；ordered：下标 i 对应槽位 i
+    "herder_slot_assignment": "min_cost",
+    "k_attract": 1.0,
+    "flock_repel_spread_scale": 2.5,
+    "flock_repel_offset": 3.0,
+    "flock_repel_gain": 4.0,
+    "herder_peer_repel_radius": 4.0,
+    "herder_peer_repel_gain": 1.0,
+    # 每步位移上限 v_max*dt；原为 5.0，现为五分之一
+    "herder_max_speed": 0.5,
+    "herder_target_reach_eps": 0.1,
+    "herder_move_min_norm": 0.1,
+}
+
+# 与旧版 SheepScenario 一致：固定初值、恒等分配、无牧者间斥力
+HERDER_PHYSICS_LEGACY_OVERRIDES: Dict[str, Any] = {
+    "herder_init_mode": "fixed_arc",
+    "herder_slot_assignment": "ordered",
+    "herder_peer_repel_gain": 0.0,
+    "herder_max_speed": 5.0,
+}
+
+
+def default_herder_motion_config() -> Dict[str, Any]:
+    """机械狗运动/分配参数字典的深拷贝。"""
+    return copy.deepcopy(_DEFAULT_HERDER_MOTION)
+
+
+def merged_herder_motion_config(
+    overrides: Optional[Dict[str, Any]] = None,
+    legacy: bool = False,
+) -> Dict[str, Any]:
+    """
+    合并默认、可选 legacy 覆盖与用户覆盖（后者优先）。
+    """
+    cfg = default_herder_motion_config()
+    if legacy:
+        cfg.update(copy.deepcopy(HERDER_PHYSICS_LEGACY_OVERRIDES))
+    if overrides:
+        cfg.update(copy.deepcopy(overrides))
+    return cfg

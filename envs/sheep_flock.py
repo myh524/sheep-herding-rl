@@ -16,6 +16,7 @@ from envs.defaults import (
     FORMATION_DELTA_RADIUS_MAX,
     FORMATION_DELTA_THETA_MAX_RAD,
     default_reward_config,
+    merged_herder_motion_config,
 )
 from envs.sheep_scenario import SheepScenario, clip_position_to_disk
 from envs.high_level_action import (
@@ -50,6 +51,8 @@ class SheepFlockEnv:
         formation_delta_radius_max: float = FORMATION_DELTA_RADIUS_MAX,
         formation_delta_coverage_max: float = FORMATION_DELTA_COVERAGE_MAX,
         high_level_interval: Optional[int] = None,
+        herder_motion: Optional[Dict[str, Any]] = None,
+        herder_physics_legacy: bool = False,
     ):
         """
         初始化环境
@@ -71,6 +74,8 @@ class SheepFlockEnv:
             formation_delta_radius_max: |a[1]|≤1 时单档半径增量（米）
             formation_delta_coverage_max: |a[2]|≤1 时单档 coverage 增量
             high_level_interval: 每 N 个 env step 刷新编队目标；None 时增量模式默认 1，绝对动作默认 5
+            herder_motion: 覆盖 envs.defaults 中机械狗运动/分配参数
+            herder_physics_legacy: True 时等价于旧版固定初值、恒等槽位分配、无牧者间斥力
         """
         self.world_size = world_size
         self.num_sheep = num_sheep
@@ -98,13 +103,18 @@ class SheepFlockEnv:
         self.step_count = 0
         
         self.reward_config = reward_config or default_reward_config()
-        
+        self.herder_motion = merged_herder_motion_config(
+            overrides=herder_motion,
+            legacy=bool(herder_physics_legacy),
+        )
+
         self.scenario = SheepScenario(
             world_size=world_size,
             num_sheep=num_sheep,
             num_herders=num_herders,
             random_seed=random_seed,
             use_herder_kinematics=use_herder_kinematics,
+            herder_motion=self.herder_motion,
         )
         
         self.action_decoder = HighLevelAction()

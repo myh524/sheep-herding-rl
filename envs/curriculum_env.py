@@ -86,6 +86,8 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         formation_delta_radius_max: float = FORMATION_DELTA_RADIUS_MAX,
         formation_delta_coverage_max: float = FORMATION_DELTA_COVERAGE_MAX,
         high_level_interval: Optional[int] = None,
+        herder_motion: Optional[Dict[str, Any]] = None,
+        herder_physics_legacy: bool = False,
     ):
         """
         Initialize curriculum learning environment
@@ -101,6 +103,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             info_include_flock_state: 与 SheepFlockEnv 相同
             formation_delta_mode, formation_delta_*: 与 SheepFlockEnv 相同
             high_level_interval: 与 SheepFlockEnv 相同
+            herder_motion, herder_physics_legacy: 与 SheepFlockEnv 相同
         """
         self.stages = stages if stages is not None else self.DEFAULT_STAGES
         self.current_stage_idx = start_stage
@@ -126,6 +129,8 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             formation_delta_radius_max=formation_delta_radius_max,
             formation_delta_coverage_max=formation_delta_coverage_max,
             high_level_interval=high_level_interval,
+            herder_motion=herder_motion,
+            herder_physics_legacy=herder_physics_legacy,
         )
 
     def _get_current_stage(self) -> CurriculumStage:
@@ -213,6 +218,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             num_sheep=new_stage.num_sheep,
             num_herders=new_stage.num_herders,
             use_herder_kinematics=self.scenario.use_herder_kinematics,
+            herder_motion=dict(self.herder_motion),
         )
         
         self.action_decoder = HighLevelAction()
@@ -251,6 +257,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
                 num_sheep=new_stage.num_sheep,
                 num_herders=new_stage.num_herders,
                 use_herder_kinematics=self.scenario.use_herder_kinematics,
+                herder_motion=dict(self.herder_motion),
             )
             
             self.action_decoder = HighLevelAction()
@@ -306,6 +313,8 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
         formation_delta_radius_max: float = FORMATION_DELTA_RADIUS_MAX,
         formation_delta_coverage_max: float = FORMATION_DELTA_COVERAGE_MAX,
         high_level_interval: Optional[int] = None,
+        herder_motion: Optional[Dict[str, Any]] = None,
+        herder_physics_legacy: bool = False,
     ):
         """
         初始化随机化环境
@@ -323,6 +332,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             info_include_flock_state: 与 SheepFlockEnv 相同
             formation_delta_mode, formation_delta_*: 与 SheepFlockEnv 相同
             high_level_interval: 与 SheepFlockEnv 相同
+            herder_motion, herder_physics_legacy: 与 SheepFlockEnv 相同
         """
         self.num_sheep_range = num_sheep_range
         self.num_herders_range = num_herders_range
@@ -353,6 +363,8 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             formation_delta_radius_max=formation_delta_radius_max,
             formation_delta_coverage_max=formation_delta_coverage_max,
             high_level_interval=high_level_interval,
+            herder_motion=herder_motion,
+            herder_physics_legacy=herder_physics_legacy,
         )
 
     def reset(self) -> np.ndarray:
@@ -390,6 +402,7 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             num_herders=self.num_herders,
             sheep_config=randomized_sheep_config(sheep_speed),
             use_herder_kinematics=self.scenario.use_herder_kinematics,
+            herder_motion=dict(self.herder_motion),
         )
         
         self.action_decoder = HighLevelAction()

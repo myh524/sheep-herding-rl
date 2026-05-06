@@ -2,8 +2,8 @@
 # 可视化运行脚本
 # 加载训练好的模型并实时渲染环境
 # 默认参数
-MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_164604/models/model_561600.pt}"
-
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
+# MODEL_PATH="${1:-results/sheep_herding/navigation_graph/rmappo/seed0/latest/models/actor.pt}"
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
     echo "错误: 模型文件不存在: $MODEL_PATH"
@@ -19,6 +19,7 @@ cd "$(dirname "$0")/.."
 # 无显示器时可: VIS_SAVE_GIF=/tmp/run.gif bash scripts/visualize.sh
 # 与训练 rollout 一致、策略按分布随机采样: VIS_STOCHASTIC=1 bash scripts/visualize.sh
 # 训练时若用了 --formation_delta，此处需: VIS_FORMATION_DELTA=1 bash scripts/visualize.sh
+# 默认使用势场运动学（狗逐步走向编队点）。若需旧式瞬移: VIS_HERDER_TELEPORT=1 bash scripts/visualize.sh
 EXTRA=()
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ -n "${VIS_SAVE_GIF:-}" ]; then
     EXTRA+=(--save_gif "$VIS_SAVE_GIF")
@@ -29,15 +30,18 @@ fi
 if [ -n "${VIS_FORMATION_DELTA:-}" ]; then
     EXTRA+=(--formation_delta)
 fi
+if [ -n "${VIS_HERDER_TELEPORT:-}" ]; then
+    EXTRA+=(--herder_teleport)
+fi
 
 python visualize.py \
     --model_path "$MODEL_PATH" \
-    --herder_teleport \
     --num_episodes 5 \
-    --num_sheep 9 \
-    --num_herders 3 \
-    --world_size 100 100 \
+    --num_sheep 5 \
+    --num_herders 4 \
+    --world_size 120 120 \
     --episode_length 200 \
     --render_delay 100 \
     --formation_delta \
+    --high_level_interval 3 \
     "${EXTRA[@]}"

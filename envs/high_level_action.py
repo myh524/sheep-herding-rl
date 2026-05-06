@@ -74,7 +74,8 @@ class HighLevelAction:
     ) -> Dict[str, Any]:
         """
         Args:
-            raw_action: shape (5,) 推荐；`a[3]、a[4]` 忽略，按 0 解码
+            raw_action: shape (5,) 推荐；几何仅 ``a[0:3]``（clip 到 [-1,1]）。
+                ``a[3]、a[4]`` 解码前置 0，可另作旁路（如质心世界坐标）不参与 clip。
             flock_center: 羊质心 (2,)
             world_size: (W, H)
         """
@@ -83,7 +84,7 @@ class HighLevelAction:
         n_in = min(5, ra.size)
         if n_in > 0:
             padded[:n_in] = ra[:n_in]
-        padded = np.clip(padded, -1.0, 1.0)
+        padded[:3] = np.clip(padded[:3], -1.0, 1.0)
         padded[3] = 0.0
         padded[4] = 0.0
         raw_action = padded
