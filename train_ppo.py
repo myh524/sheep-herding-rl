@@ -209,6 +209,12 @@ def parse_args():
         help='旧版机械狗物理：π 侧固定初值、槽位按序分配、无牧者间斥力（与旧 checkpoint 分布对齐）',
     )
     parser.add_argument(
+        '--no-disk-boundary',
+        action='store_true',
+        default=False,
+        help='关闭圆形场地约束：羊与机械狗不裁剪到圆盘、无圆边界 Boids 斥力（可任意远离原点）',
+    )
+    parser.add_argument(
         '--herder_init',
         type=str,
         default=None,
@@ -366,6 +372,73 @@ def parse_args():
         choices=['auto', 'cuda', 'cpu'],
         help='策略网络与 PPO 更新使用的设备：auto 检测 CUDA；cuda 强制 GPU（不可用则报错）；cpu 强制 CPU。',
     )
+    parser.add_argument(
+        '--low-level-model-dir',
+        type=str,
+        default=None,
+        help='InforMARL 低层 Graph MAPPO 权重目录（含 actor.pt）或 checkpoints 下单个 model_*.pt',
+    )
+    parser.add_argument(
+        '--low-level-substeps',
+        type=int,
+        default=None,
+        help='每个主环境步内低层仿真子步数；默认 round(dt/0.1)',
+    )
+    parser.add_argument(
+        '--low-level-device',
+        type=str,
+        default='cpu',
+        help='低层 MAPPO 推理设备（cpu / cuda）',
+    )
+    parser.add_argument(
+        '--low-level-world-size',
+        type=float,
+        default=None,
+        help='低层 MPE world_size；默认 min(W,H) 与主场地一致',
+    )
+    parser.add_argument(
+        '--low-level-num-obstacles',
+        type=int,
+        default=1,
+        help='低层障碍数量（牧羊训练常为 1）',
+    )
+    parser.add_argument(
+        '--low-level-max-speed',
+        type=float,
+        default=2.0,
+        help='低层智能体 max_speed，应与训练一致',
+    )
+    parser.add_argument(
+        '--low-level-max-edge-dist',
+        type=float,
+        default=None,
+        help='低层 GNN 连边距离阈值 max_edge_dist；默认 30（大 world_size 时）；与 InforMARL 训练一致时请显式传入',
+    )
+    parser.add_argument(
+        '--low-level-no-shepherd',
+        action='store_true',
+        default=False,
+        help='关闭低层 use_shepherd_env（默认开启以与 train.sh 对齐）',
+    )
+    parser.add_argument(
+        '--low-level-stochastic',
+        action='store_true',
+        default=False,
+        help='低层策略采样动作（默认确定性）',
+    )
+    parser.add_argument(
+        '--hierarchical-phase',
+        type=str,
+        default='frozen_low',
+        choices=['frozen_low', 'alternating_stub'],
+        help='frozen_low：仅训高层；alternating_stub：按间隔打印低层微调占位提示',
+    )
+    parser.add_argument(
+        '--low-level-finetune-every',
+        type=int,
+        default=0,
+        help='hierarchical_phase=alternating_stub 时每 N 个 macro episode 打印一次提示；0 表示关闭',
+    )
 
     args = parser.parse_args()
     return args
@@ -384,6 +457,8 @@ def _extra_sheep_env_kwargs(args) -> Dict[str, Any]:
         kw["high_level_interval"] = int(args.high_level_interval)
     if getattr(args, "herder_physics_legacy", False):
         kw["herder_physics_legacy"] = True
+    if getattr(args, "no_disk_boundary", False):
+        kw["enforce_disk_boundary"] = False
     hm: Dict[str, Any] = {}
     if getattr(args, "herder_init", None):
         hm["herder_init_mode"] = str(args.herder_init)
@@ -391,6 +466,19 @@ def _extra_sheep_env_kwargs(args) -> Dict[str, Any]:
         hm["herder_slot_assignment"] = str(args.herder_assignment)
     if hm:
         kw["herder_motion"] = hm
+    if getattr(args, "low_level_model_dir", None):
+        kw["low_level_model_dir"] = str(args.low_level_model_dir)
+        if getattr(args, "low_level_substeps", None) is not None:
+            kw["low_level_substeps"] = int(args.low_level_substeps)
+        kw["low_level_device"] = str(args.low_level_device)
+        if getattr(args, "low_level_world_size", None) is not None:
+            kw["low_level_world_size"] = float(args.low_level_world_size)
+        kw["low_level_num_obstacles"] = int(args.low_level_num_obstacles)
+        kw["low_level_max_speed"] = float(args.low_level_max_speed)
+        if getattr(args, "low_level_max_edge_dist", None) is not None:
+            kw["low_level_max_edge_dist"] = float(args.low_level_max_edge_dist)
+        kw["low_level_use_shepherd"] = not bool(args.low_level_no_shepherd)
+        kw["low_level_deterministic"] = not bool(args.low_level_stochastic)
     return kw
 
 
@@ -988,6 +1076,17 @@ class PPOTrainer:
             self.buffer.after_update()
 
             self.episode = episode
+
+            if (
+                getattr(self.args, "hierarchical_phase", "") == "alternating_stub"
+                and int(getattr(self.args, "low_level_finetune_every", 0) or 0) > 0
+                and (episode + 1) % int(self.args.low_level_finetune_every) == 0
+            ):
+                print(
+                    "[hierarchical] alternating_stub：可在此处子进程调用 "
+                    "InforMARL/onpolicy/scripts/train_mpe.py 或使用 "
+                    "GraphReplayBuffer 对低层 MAPPO 做 on-policy 微调。"
+                )
 
             avg_reward = np.mean(self.buffer.rewards) * self.args.episode_length
             current_lr = self.optimizer.param_groups[0]['lr']

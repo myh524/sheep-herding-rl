@@ -88,6 +88,16 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         high_level_interval: Optional[int] = None,
         herder_motion: Optional[Dict[str, Any]] = None,
         herder_physics_legacy: bool = False,
+        enforce_disk_boundary: bool = True,
+        low_level_model_dir: Optional[str] = None,
+        low_level_substeps: Optional[int] = None,
+        low_level_device: str = "cpu",
+        low_level_world_size: Optional[float] = None,
+        low_level_num_obstacles: int = 1,
+        low_level_max_speed: float = 2.0,
+        low_level_max_edge_dist: Optional[float] = None,
+        low_level_use_shepherd: bool = True,
+        low_level_deterministic: bool = True,
     ):
         """
         Initialize curriculum learning environment
@@ -104,6 +114,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             formation_delta_mode, formation_delta_*: 与 SheepFlockEnv 相同
             high_level_interval: 与 SheepFlockEnv 相同
             herder_motion, herder_physics_legacy: 与 SheepFlockEnv 相同
+            low_level_*: 与 SheepFlockEnv 相同（注意阶段切换时 num_herders 变化需与低层 checkpoint 一致）
         """
         self.stages = stages if stages is not None else self.DEFAULT_STAGES
         self.current_stage_idx = start_stage
@@ -131,6 +142,16 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             high_level_interval=high_level_interval,
             herder_motion=herder_motion,
             herder_physics_legacy=herder_physics_legacy,
+            enforce_disk_boundary=enforce_disk_boundary,
+            low_level_model_dir=low_level_model_dir,
+            low_level_substeps=low_level_substeps,
+            low_level_device=low_level_device,
+            low_level_world_size=low_level_world_size,
+            low_level_num_obstacles=low_level_num_obstacles,
+            low_level_max_speed=low_level_max_speed,
+            low_level_max_edge_dist=low_level_max_edge_dist,
+            low_level_use_shepherd=low_level_use_shepherd,
+            low_level_deterministic=low_level_deterministic,
         )
 
     def _get_current_stage(self) -> CurriculumStage:
@@ -219,6 +240,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             num_herders=new_stage.num_herders,
             use_herder_kinematics=self.scenario.use_herder_kinematics,
             herder_motion=dict(self.herder_motion),
+            enforce_disk_boundary=self.enforce_disk_boundary,
         )
         
         self.action_decoder = HighLevelAction()
@@ -227,6 +249,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         self._reset_formation_integrator()
 
         self.episode_history = []
+        self._low_bridge = None
 
         print(f"Advanced to {new_stage.name}: "
               f"sheep={new_stage.num_sheep}, "
@@ -258,6 +281,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
                 num_herders=new_stage.num_herders,
                 use_herder_kinematics=self.scenario.use_herder_kinematics,
                 herder_motion=dict(self.herder_motion),
+                enforce_disk_boundary=self.enforce_disk_boundary,
             )
             
             self.action_decoder = HighLevelAction()
@@ -265,6 +289,7 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             self._setup_spaces()
             self._reset_formation_integrator()
             self.episode_history = []
+            self._low_bridge = None
 
     def get_curriculum_info(self) -> Dict[str, Any]:
         """Get curriculum learning info"""
@@ -315,6 +340,16 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
         high_level_interval: Optional[int] = None,
         herder_motion: Optional[Dict[str, Any]] = None,
         herder_physics_legacy: bool = False,
+        enforce_disk_boundary: bool = True,
+        low_level_model_dir: Optional[str] = None,
+        low_level_substeps: Optional[int] = None,
+        low_level_device: str = "cpu",
+        low_level_world_size: Optional[float] = None,
+        low_level_num_obstacles: int = 1,
+        low_level_max_speed: float = 2.0,
+        low_level_max_edge_dist: Optional[float] = None,
+        low_level_use_shepherd: bool = True,
+        low_level_deterministic: bool = True,
     ):
         """
         初始化随机化环境
@@ -365,6 +400,16 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             high_level_interval=high_level_interval,
             herder_motion=herder_motion,
             herder_physics_legacy=herder_physics_legacy,
+            enforce_disk_boundary=enforce_disk_boundary,
+            low_level_model_dir=low_level_model_dir,
+            low_level_substeps=low_level_substeps,
+            low_level_device=low_level_device,
+            low_level_world_size=low_level_world_size,
+            low_level_num_obstacles=low_level_num_obstacles,
+            low_level_max_speed=low_level_max_speed,
+            low_level_max_edge_dist=low_level_max_edge_dist,
+            low_level_use_shepherd=low_level_use_shepherd,
+            low_level_deterministic=low_level_deterministic,
         )
 
     def reset(self) -> np.ndarray:
@@ -403,12 +448,14 @@ class RandomizedSheepFlockEnv(SheepFlockEnv):
             sheep_config=randomized_sheep_config(sheep_speed),
             use_herder_kinematics=self.scenario.use_herder_kinematics,
             herder_motion=dict(self.herder_motion),
+            enforce_disk_boundary=self.enforce_disk_boundary,
         )
         
         self.action_decoder = HighLevelAction()
         
         self._setup_spaces()
-        
+        self._low_bridge = None
+
         target_pos = sample_random_target_position(self.world_size, rng=self._rng)
         
         self.scenario.reset(target_position=target_pos)

@@ -2,8 +2,9 @@
 # 可视化运行脚本
 # 加载训练好的模型并实时渲染环境
 # 默认参数
-MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
-# MODEL_PATH="${1:-results/sheep_herding/navigation_graph/rmappo/seed0/latest/models/actor.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_2402400.pt}"
+
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260506_184044/models/model_1202400.pt}"
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
     echo "错误: 模型文件不存在: $MODEL_PATH"
@@ -39,9 +40,13 @@ python visualize.py \
     --num_episodes 5 \
     --num_sheep 5 \
     --num_herders 4 \
-    --world_size 120 120 \
-    --episode_length 200 \
+    --world_size 100 100 \
+    --episode_length 100 \
     --render_delay 100 \
     --formation_delta \
     --high_level_interval 3 \
+    --no-disk-boundary \
+    --save-sheep-trajectory-dir figures/sheep_trajectories \
+    --herder_teleport \
+    # --low-level-model-dir InforMARL/onpolicy/results/GraphMPE/navigation_graph/rmappo/informarl/run5/models \
     "${EXTRA[@]}"

@@ -114,8 +114,9 @@ _MATPLOTLIB_BACKEND = _configure_matplotlib_backend(_FORCE_HEADLESS)
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib.ticker import FuncFormatter
 from matplotlib.widgets import Button
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 if _MATPLOTLIB_BACKEND.lower() == "agg":
     warnings.filterwarnings(
@@ -142,6 +143,18 @@ from envs.defaults import (
     FORMATION_DELTA_THETA_MAX_DEG,
 )
 from onpolicy.algorithms.ppo_actor_critic import PPOActorCritic, ImprovedActorCritic
+
+# 编队采样目标点上的小圆（世界坐标半径）；alpha 越小越透明（0 全透明，1 不透明）
+FORMATION_SAMPLE_CIRCLE_RADIUS = 1.2
+FORMATION_SAMPLE_CIRCLE_ALPHA = 0.45
+FORMATION_SAMPLE_CIRCLE_ZORDER = 3
+# 机械狗应在采样圆之上；箭头略低于方块以免完全盖住箭头尖
+HERDER_ARROW_ZORDER = 5
+HERDER_SCATTER_ZORDER = 6
+EVASION_ZONE_ZORDER = 2
+
+# 仅改坐标轴刻度「读数」：数据仍为真实 world 米制；场地图形边界在刻度上读成 ± 该值（总跨度 2×）
+VIZ_AXIS_LABEL_DISPLAY_HALF = 250.0
 
 
 @dataclass
@@ -188,6 +201,12 @@ def parse_args():
         help='与 train_ppo --herder_physics_legacy 一致',
     )
     parser.add_argument(
+        '--no-disk-boundary',
+        action='store_true',
+        default=False,
+        help='与 train_ppo --no-disk-boundary 一致：羊/狗不受圆盘约束；坐标轴按 world_size 矩形',
+    )
+    parser.add_argument(
         '--herder_init',
         type=str,
         default=None,
@@ -227,6 +246,60 @@ def parse_args():
         help='与 train_ppo 一致；默认 None 使用环境自动默认',
     )
     parser.add_argument(
+        '--low-level-model-dir',
+        type=str,
+        default=None,
+        help='指定后启用联合高低层：加载 InforMARL 低层 Graph MAPPO（目录含 actor.pt 或单个 model_*.pt），主步内子仿真驱动牧者',
+    )
+    parser.add_argument(
+        '--low-level-substeps',
+        type=int,
+        default=None,
+        help='每主环境步内低层子步数；默认 round(dt/0.1)，与 train_ppo 一致',
+    )
+    parser.add_argument(
+        '--low-level-device',
+        type=str,
+        default='cpu',
+        help='低层策略推理设备：cpu 或 cuda（可与高层可视化 device 不同）',
+    )
+    parser.add_argument(
+        '--low-level-world-size',
+        type=float,
+        default=None,
+        help='低层 MPE world_size；默认 min(W,H)',
+    )
+    parser.add_argument(
+        '--low-level-num-obstacles',
+        type=int,
+        default=1,
+        help='低层障碍数，应与低层训练一致',
+    )
+    parser.add_argument(
+        '--low-level-max-speed',
+        type=float,
+        default=2.0,
+        help='低层 max_speed，应与低层训练一致',
+    )
+    parser.add_argument(
+        '--low-level-max-edge-dist',
+        type=float,
+        default=None,
+        help='低层 GNN max_edge_dist；默认与 train_ppo 一致（未设时用环境默认 30）',
+    )
+    parser.add_argument(
+        '--low-level-no-shepherd',
+        action='store_true',
+        default=False,
+        help='关闭低层 use_shepherd_env（默认开启，与 InforMARL 训练脚本对齐）',
+    )
+    parser.add_argument(
+        '--low-level-stochastic',
+        action='store_true',
+        default=False,
+        help='低层策略按分布采样动作（默认确定性）',
+    )
+    parser.add_argument(
         '--stochastic_policy',
         action='store_true',
         default=False,
@@ -250,6 +323,13 @@ def parse_args():
     parser.add_argument('--save_gif', type=str, default=None)
     parser.add_argument('--save_video', type=str, default=None)
     parser.add_argument(
+        '--save-sheep-trajectory-dir',
+        type=str,
+        default=None,
+        metavar='DIR',
+        help='若指定目录，则每个 episode 结束后在该目录保存一张「全部羊轨迹」PNG（自动创建目录）',
+    )
+    parser.add_argument(
         '--force_headless',
         action='store_true',
         help='强制使用无窗口 Agg 后端（需在命令中放在靠前位置以便生效，或设置 MPLBACKEND=Agg）',
@@ -262,6 +342,31 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def _low_level_sheep_env_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """与 train_ppo._extra_sheep_env_kwargs 中的低层字段一致；未传 --low-level-model-dir 时返回空字典。"""
+    kw: Dict[str, Any] = {}
+    mdir = getattr(args, "low_level_model_dir", None)
+    if not mdir:
+        return kw
+    kw["low_level_model_dir"] = str(mdir)
+    if getattr(args, "low_level_substeps", None) is not None:
+        kw["low_level_substeps"] = int(args.low_level_substeps)
+    kw["low_level_device"] = str(args.low_level_device)
+    if getattr(args, "low_level_world_size", None) is not None:
+        kw["low_level_world_size"] = float(args.low_level_world_size)
+    kw["low_level_num_obstacles"] = int(args.low_level_num_obstacles)
+    kw["low_level_max_speed"] = float(args.low_level_max_speed)
+    if getattr(args, "low_level_max_edge_dist", None) is not None:
+        kw["low_level_max_edge_dist"] = float(args.low_level_max_edge_dist)
+    kw["low_level_use_shepherd"] = not bool(
+        getattr(args, "low_level_no_shepherd", False)
+    )
+    kw["low_level_deterministic"] = not bool(
+        getattr(args, "low_level_stochastic", False)
+    )
+    return kw
 
 
 def create_args_from_checkpoint(checkpoint_path: str, use_improved: bool = False) -> argparse.Namespace:
@@ -412,20 +517,71 @@ class Visualizer:
         self.is_improved = isinstance(policy, ImprovedActorCritic)
         self._interactive = _matplotlib_is_interactive()
         self._gui_shown = False
+        self._sheep_traj_buffer: Optional[List[np.ndarray]] = None
+
+    def _arena_view(self):
+        """返回 (xlim, ylim, 是否绘制圆盘边界)。取景按真实 world_size / world_radius；刻度读数见 _apply_axis_display_tick_labels。"""
+        sc = self.env.scenario
+        if getattr(sc, "enforce_disk_boundary", True):
+            R = float(sc.world_radius)
+            pad = max(R * 0.06, 1.0)
+            return (-R - pad, R + pad), (-R - pad, R + pad), True
+        Wx, Wy = float(self.env.world_size[0]), float(self.env.world_size[1])
+        hx, hy = Wx / 2.0, Wy / 2.0
+        pad = max(Wx, Wy) * 0.06
+        return (-hx - pad, hx + pad), (-hy - pad, hy + pad), False
+
+    def _axis_label_display_scales(self) -> Tuple[float, float]:
+        """真实坐标 → 轴刻度显示值 的乘子；使场边界在刻度上约为 ±VIZ_AXIS_LABEL_DISPLAY_HALF。"""
+        half = float(VIZ_AXIS_LABEL_DISPLAY_HALF)
+        sc = self.env.scenario
+        if getattr(sc, "enforce_disk_boundary", True):
+            R = max(float(sc.world_radius), 1e-9)
+            s = half / R
+            return (s, s)
+        Wx, Wy = float(self.env.world_size[0]), float(self.env.world_size[1])
+        hx = max(Wx / 2.0, 1e-9)
+        hy = max(Wy / 2.0, 1e-9)
+        return (half / hx, half / hy)
+
+    def _apply_axis_display_tick_labels(self, ax) -> None:
+        sx, sy = self._axis_label_display_scales()
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda v, _p, sx=sx: f"{v * sx:g}")
+        )
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda v, _p, sy=sy: f"{v * sy:g}")
+        )
 
     def setup_figure(self):
         self.fig, self.ax = plt.subplots(figsize=(10, 10))
-        R = float(self.env.scenario.world_radius)
-        pad = max(R * 0.06, 1.0)
-        self.ax.set_xlim(-R - pad, R + pad)
-        self.ax.set_ylim(-R - pad, R + pad)
+        (x0, x1), (y0, y1), draw_disk = self._arena_view()
+        self.ax.set_xlim(x0, x1)
+        self.ax.set_ylim(y0, y1)
         self.ax.set_aspect('equal')
         self.ax.set_facecolor('#f5f5f5')
-        self.ax.add_patch(
-            patches.Circle(
-                (0.0, 0.0), R, fill=False, edgecolor="0.5", linewidth=1.2, linestyle="--"
+        if draw_disk:
+            R = float(self.env.scenario.world_radius)
+            self.ax.add_patch(
+                patches.Circle(
+                    (0.0, 0.0), R, fill=False, edgecolor="0.5", linewidth=1.2, linestyle="--"
+                )
             )
-        )
+        else:
+            Wx, Wy = float(self.env.world_size[0]), float(self.env.world_size[1])
+            hx, hy = Wx / 2.0, Wy / 2.0
+            self.ax.add_patch(
+                patches.Rectangle(
+                    (-hx, -hy),
+                    Wx,
+                    Wy,
+                    fill=False,
+                    edgecolor="0.65",
+                    linewidth=1.0,
+                    linestyle="--",
+                )
+            )
+        self._apply_axis_display_tick_labels(self.ax)
 
         if self._interactive:
             ax_pause = plt.axes([0.85, 0.01, 0.12, 0.04])
@@ -480,177 +636,90 @@ class Visualizer:
     def render_env(self):
         self.ax.clear()
         
-        R = float(self.env.scenario.world_radius)
-        pad = max(R * 0.06, 1.0)
-        self.ax.set_xlim(-R - pad, R + pad)
-        self.ax.set_ylim(-R - pad, R + pad)
+        (x0, x1), (y0, y1), draw_disk = self._arena_view()
+        self.ax.set_xlim(x0, x1)
+        self.ax.set_ylim(y0, y1)
         self.ax.set_aspect('equal')
         self.ax.set_facecolor('#f5f5f5')
 
-        arena = patches.Circle(
-            (0.0, 0.0), R, fill=False, edgecolor="0.5", linewidth=1.2, linestyle="--"
-        )
-        self.ax.add_patch(arena)
+        R = float(self.env.scenario.world_radius)
+        if draw_disk:
+            arena = patches.Circle(
+                (0.0, 0.0), R, fill=False, edgecolor="0.5", linewidth=1.2, linestyle="--"
+            )
+            self.ax.add_patch(arena)
+        else:
+            Wx, Wy = float(self.env.world_size[0]), float(self.env.world_size[1])
+            hx, hy = Wx / 2.0, Wy / 2.0
+            self.ax.add_patch(
+                patches.Rectangle(
+                    (-hx, -hy),
+                    Wx,
+                    Wy,
+                    fill=False,
+                    edgecolor="0.65",
+                    linewidth=1.0,
+                    linestyle="--",
+                )
+            )
         
         target = self.env.scenario.get_target_position()
-        target_circle = patches.Circle(target, 3.0, color='green', alpha=0.3)
+        target_circle = patches.Circle(target, 5.0, color='green', alpha=0.3)
         self.ax.add_patch(target_circle)
         self.ax.plot(target[0], target[1], 'g*', markersize=20)
 
-        # 与当前仿真一致：[4]–[7] 为轴对齐四向极值 e0..e3/R，与 r_envelope 包络矩形相同
-        obs_vec = self.env.scenario.get_observation()
-        if obs_vec is not None and len(obs_vec) >= 8:
-            o4, o5, o6, o7 = (
-                float(obs_vec[4]),
-                float(obs_vec[5]),
-                float(obs_vec[6]),
-                float(obs_vec[7]),
-            )
-            tx, ty = float(target[0]), float(target[1])
-            w_rect = (o4 + o6) * R
-            h_rect = (o5 + o7) * R
-            x0 = tx - o6 * R
-            y0 = ty - o7 * R
-            if len(self.env.scenario.sheep) > 0 and w_rect > 1e-4 and h_rect > 1e-4:
-                env_rect = patches.Rectangle(
-                    (x0, y0),
-                    w_rect,
-                    h_rect,
-                    linewidth=1.6,
-                    edgecolor="darkviolet",
-                    facecolor="mediumpurple",
-                    alpha=0.14,
-                    zorder=2,
-                )
-                self.ax.add_patch(env_rect)
-            area_bb = w_rect * h_rect
-            area_norm = area_bb / max((2.0 * R) ** 2, 1e-6)
-            obs_txt = (
-                "观测 [4]–[7]：轴对齐四向极值 e0..e3 / R（与包络惩罚一致）\n"
-                f"[4] e0=max(Δx+)/R = {o4:.3f}  [5] e1=max(Δy+)/R = {o5:.3f}\n"
-                f"[6] e2=max(Δx−)/R = {o6:.3f}  [7] e3=max(Δy−)/R = {o7:.3f}\n"
-                f"AABB 面积 A = {area_bb:.1f}  (A/r_scale² = {area_norm:.3f}, r_scale=2R)"
-            )
-            self.ax.text(
-                0.02,
-                0.98,
-                obs_txt,
-                transform=self.ax.transAxes,
-                va="top",
-                ha="left",
-                fontsize=8,
-                family="monospace",
-                color="#222",
-                bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.88, edgecolor="0.6"),
-                zorder=10,
-            )
-        
         flock_state = self.env.scenario.get_flock_state()
         sheep_positions = flock_state['positions']
         
         if len(sheep_positions) > 0:
             sheep_positions = np.array(sheep_positions)
             self.ax.scatter(sheep_positions[:, 0], sheep_positions[:, 1], 
-                           c='gray', s=80, alpha=0.7, marker='o', edgecolors='black')
+                           c='gray', s=50, alpha=0.7, marker='o', edgecolors='black')
             
             flock_center = self.env.scenario.get_flock_center()
             self.ax.plot(flock_center[0], flock_center[1], 'k+', markersize=12, markeredgewidth=2)
         
         herder_positions = self.env.scenario.herder_positions.copy()
         
-        if hasattr(self.env.scenario, 'herder_targets'):
+        if hasattr(self.env.scenario, "herder_targets"):
             herder_targets = self.env.scenario.herder_targets
-            target_pos = self.env.scenario.get_target_position()
-            # 与仿真一致：羊质心/弧来自「上次高层刷新」时的 decode，而非每步策略输出
-            # （env.high_level_interval 内 herder_targets 不变，但 action_history 每步都在变）
-            viz_dec = getattr(self.env, "_last_formation_decoded", None)
-            flock_c = None
-            radius = None
-            coverage = None
-            theta_mid = None
-            if viz_dec is not None:
-                flock_c = np.asarray(viz_dec["flock_center"], dtype=float)
-                radius = float(viz_dec["radius"])
-                coverage = float(viz_dec["coverage"])
-                theta_mid = float(viz_dec["theta_mid_rad"])
-            elif len(self.state.action_history) > 0 and not getattr(
-                self.env, "formation_delta_mode", False
-            ):
-                last_action = self.state.action_history[-1]
-                fc = self.env.scenario.get_flock_center()
-                decoded = self.env.action_decoder.decode_action(
-                    last_action,
-                    fc,
-                    self.env.world_size,
-                )
-                flock_c = np.asarray(decoded["flock_center"], dtype=float)
-                radius = float(decoded["radius"])
-                coverage = float(decoded["coverage"])
-                theta_mid = float(decoded["theta_mid_rad"])
-
-            if flock_c is not None and radius is not None:
-                dec = self.env.action_decoder
-                O = flock_c.astype(float)
-                theta_mid_deg = float(np.degrees(theta_mid))
-                span_rad, at_max_span = dec.effective_span_radians(
-                    coverage, self.env.num_herders
-                )
-                span_deg = float(np.degrees(span_rad))
-
-                arc_ring = patches.Circle(
-                    O, radius, fill=False, color="orange", linewidth=2, alpha=0.7
-                )
-                self.ax.add_patch(arc_ring)
-
-                self.ax.plot(O[0], O[1], "o", color="red", markersize=12,
-                            markeredgecolor="darkred", markeredgewidth=2)
-
-                if span_deg > 0.5:
-                    wedge = patches.Wedge(
-                        O,
-                        radius,
-                        theta_mid_deg - span_deg / 2.0,
-                        theta_mid_deg + span_deg / 2.0,
-                        width=radius * 0.15,
-                        facecolor="orange",
-                        alpha=0.2,
-                        edgecolor="darkorange",
-                        linewidth=1.5,
-                    )
-                    self.ax.add_patch(wedge)
-                
+            if herder_targets is not None:
                 for i in range(self.env.num_herders):
-                    target_pos_i = herder_targets[i]
-                    
-                    self.ax.plot(target_pos_i[0], target_pos_i[1], 'o', color='darkorange', 
-                                markersize=8, alpha=0.6, markeredgecolor='black', markeredgewidth=1)
-                    
+                    target_pos_i = np.asarray(herder_targets[i], dtype=float).reshape(2)
+                    self.ax.add_patch(
+                        patches.Circle(
+                            (float(target_pos_i[0]), float(target_pos_i[1])),
+                            FORMATION_SAMPLE_CIRCLE_RADIUS,
+                            facecolor="gold",
+                            edgecolor="darkorange",
+                            linewidth=1.0,
+                            alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
+                            zorder=FORMATION_SAMPLE_CIRCLE_ZORDER,
+                        )
+                    )
                     if i < len(herder_positions):
                         hpos = herder_positions[i]
                         direction = target_pos_i - hpos
-                        dist = np.linalg.norm(direction)
-                        
+                        dist = float(np.linalg.norm(direction))
                         if dist > 0.5:
                             direction = direction / dist
                             arrow_len = min(dist * 0.4, 3.0)
-                            self.ax.annotate('', 
-                                            xy=(hpos[0] + direction[0] * arrow_len, 
-                                                hpos[1] + direction[1] * arrow_len),
-                                            xytext=hpos,
-                                            arrowprops=dict(arrowstyle='->', color='green', 
-                                                           lw=1.5, alpha=0.8))
-                
-                mode = self.env.action_decoder.get_formation_mode(coverage)
-                mx = " MAX" if at_max_span else ""
-                self.ax.text(
-                    O[0],
-                    O[1] - 2,
-                    f"{mode}{mx} | R={radius:.1f} cov={coverage:.2f} Θ={span_deg:.0f}°",
-                    ha="center",
-                    fontsize=9,
-                    color="darkorange",
-                    fontweight="bold",
-                )
+                            self.ax.annotate(
+                                "",
+                                xy=(
+                                    hpos[0] + direction[0] * arrow_len,
+                                    hpos[1] + direction[1] * arrow_len,
+                                ),
+                                xytext=hpos,
+                                zorder=HERDER_ARROW_ZORDER,
+                                arrowprops=dict(
+                                    arrowstyle="->",
+                                    color="green",
+                                    lw=1.5,
+                                    alpha=0.8,
+                                    zorder=HERDER_ARROW_ZORDER,
+                                ),
+                            )
         
         evasion_r = float(
             self.env.scenario.sheep_config.get("evasion_radius", 8.0)
@@ -665,12 +734,21 @@ class Visualizer:
                 edgecolor="blue",
                 linestyle="--",
                 linewidth=1,
+                zorder=EVASION_ZONE_ZORDER,
             )
             self.ax.add_patch(evasion_circle)
         
-        self.ax.scatter(herder_positions[:, 0], herder_positions[:, 1],
-                       c='blue', s=120, alpha=0.9, marker='s', edgecolors='darkblue',
-                       label='Herder')
+        self.ax.scatter(
+            herder_positions[:, 0],
+            herder_positions[:, 1],
+            c="blue",
+            s=80,
+            alpha=0.9,
+            marker="s",
+            edgecolors="darkblue",
+            label="Herder",
+            zorder=HERDER_SCATTER_ZORDER,
+        )
         
         legend_elements = [
             plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='green', 
@@ -679,21 +757,199 @@ class Visualizer:
                       markersize=10, markeredgecolor='black', label='Sheep'),
             plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='blue',
                       markersize=10, markeredgecolor='darkblue', label='Herder'),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
-                      markersize=10, markeredgecolor='darkred', label='Arc center (flock)'),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='darkorange',
-                      markersize=8, markeredgecolor='black', label='Sampled Target'),
-            patches.Patch(facecolor='orange', alpha=0.2, edgecolor='darkorange',
-                         label='Station Region'),
+            patches.Patch(
+                facecolor="gold",
+                alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
+                edgecolor="darkorange",
+                linewidth=1.0,
+                label="Sampled target",
+            ),
             patches.Patch(facecolor='blue', alpha=0.08, edgecolor='blue',
                          linestyle='--', label='Evasion Zone'),
         ]
         self.ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
-        
-        status = "PAUSED" if self.paused else "RUNNING"
-        self.ax.set_title(f'Step {self.state.current_step} | Reward: {self.state.total_reward:.1f} | {status}', 
-                         fontsize=12, fontweight='bold')
         self.ax.grid(True, alpha=0.3)
+        self._apply_axis_display_tick_labels(self.ax)
+
+    def _sheep_positions_now(self) -> np.ndarray:
+        flock = self.env.scenario.get_flock_state()
+        pos = flock.get("positions")
+        if pos is None or len(pos) == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+        return np.asarray(pos, dtype=np.float64).reshape(-1, 2)
+
+    @staticmethod
+    def _smooth_xy_traj(xy: np.ndarray, half_window: Optional[int] = None) -> np.ndarray:
+        """对 (T,2) 路径做各维独立的时间滑动平均；half_window 为单侧邻域点数，None 时按轨迹长度自适应。"""
+        xy = np.asarray(xy, dtype=np.float64)
+        t = int(xy.shape[0])
+        if t < 3:
+            return xy.copy()
+        if half_window is None:
+            hw = max(1, min(8, max(1, t // 8)))
+        else:
+            hw = max(1, int(half_window))
+        hw = min(hw, t // 2)
+        out = np.zeros_like(xy)
+        for i in range(t):
+            lo, hi = max(0, i - hw), min(t, i + hw + 1)
+            out[i] = xy[lo:hi].mean(axis=0)
+        return out
+
+    @staticmethod
+    def _allocate_sheep_trajectory_path(out_dir: str, model_stem: str, episode_num: int) -> str:
+        """在 out_dir 下生成不覆盖已存在文件的 PNG 路径。"""
+        base = f"sheep_trajectory_{model_stem}_ep{int(episode_num):03d}"
+        path = os.path.join(out_dir, f"{base}.png")
+        if not os.path.isfile(path):
+            return path
+        k = 1
+        while True:
+            path = os.path.join(out_dir, f"{base}_{k}.png")
+            if not os.path.isfile(path):
+                return path
+            k += 1
+
+    def _save_sheep_trajectory_figure(self, episode_num: int) -> None:
+        out_dir = getattr(self.args, "save_sheep_trajectory_dir", None)
+        if not out_dir or self._sheep_traj_buffer is None:
+            return
+        buf = self._sheep_traj_buffer
+        if len(buf) == 0:
+            print("  跳过羊轨迹图: 无采样点")
+            return
+        traj = np.stack(buf, axis=0)
+        n_sheep = int(traj.shape[1])
+        if n_sheep == 0:
+            print("  跳过羊轨迹图: 当前无羊")
+            return
+        os.makedirs(out_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(self.args.model_path))[0]
+        path = self._allocate_sheep_trajectory_path(out_dir, stem, episode_num)
+
+        fig_traj, ax_traj = plt.subplots(figsize=(10, 10))
+        (x0, x1), (y0, y1), draw_disk = self._arena_view()
+        ax_traj.set_xlim(x0, x1)
+        ax_traj.set_ylim(y0, y1)
+        ax_traj.set_aspect("equal")
+        ax_traj.set_facecolor("#f5f5f5")
+        R = float(self.env.scenario.world_radius)
+        if draw_disk:
+            ax_traj.add_patch(
+                patches.Circle(
+                    (0.0, 0.0),
+                    R,
+                    fill=False,
+                    edgecolor="0.5",
+                    linewidth=1.2,
+                    linestyle="--",
+                )
+            )
+        else:
+            Wx, Wy = float(self.env.world_size[0]), float(self.env.world_size[1])
+            hx, hy = Wx / 2.0, Wy / 2.0
+            ax_traj.add_patch(
+                patches.Rectangle(
+                    (-hx, -hy),
+                    Wx,
+                    Wy,
+                    fill=False,
+                    edgecolor="0.65",
+                    linewidth=1.0,
+                    linestyle="--",
+                )
+            )
+        target = self.env.scenario.get_target_position()
+        ax_traj.scatter(
+            float(target[0]),
+            float(target[1]),
+            c="green",
+            s=200,
+            marker="*",
+            zorder=8,
+            edgecolors="darkgreen",
+            linewidths=0.8,
+            label="Target",
+        )
+
+        _tab = plt.get_cmap("tab10")
+        # tab10 索引 3 为红色，留给质心专用
+        sheep_colors = [_tab(j) for j in range(10) if j != 3]
+        for i in range(n_sheep):
+            color = sheep_colors[i % len(sheep_colors)]
+            ax_traj.plot(
+                traj[:, i, 0],
+                traj[:, i, 1],
+                "--",
+                color=color,
+                lw=1.6,
+                alpha=0.88,
+                label=f"Sheep {i}",
+                zorder=3,
+            )
+            ax_traj.scatter(
+                traj[0, i, 0],
+                traj[0, i, 1],
+                color=color,
+                s=42,
+                marker="o",
+                edgecolors="black",
+                linewidths=0.8,
+                zorder=6,
+            )
+            ax_traj.scatter(
+                traj[-1, i, 0],
+                traj[-1, i, 1],
+                color=color,
+                s=48,
+                marker="s",
+                edgecolors="black",
+                linewidths=0.8,
+                zorder=7,
+            )
+
+        centroid = np.mean(traj, axis=1)
+        centroid_s = self._smooth_xy_traj(centroid)
+        ax_traj.plot(
+            centroid_s[:, 0],
+            centroid_s[:, 1],
+            "-",
+            color="crimson",
+            lw=2.4,
+            alpha=0.92,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            label="Flock centroid (smoothed)",
+            zorder=5,
+        )
+        ax_traj.scatter(
+            centroid_s[0, 0],
+            centroid_s[0, 1],
+            c="crimson",
+            s=58,
+            marker="D",
+            zorder=8,
+            edgecolors="white",
+            linewidths=0.9,
+        )
+        ax_traj.scatter(
+            centroid_s[-1, 0],
+            centroid_s[-1, 1],
+            c="crimson",
+            s=62,
+            marker="P",
+            zorder=8,
+            edgecolors="white",
+            linewidths=0.9,
+        )
+
+        ax_traj.grid(True, alpha=0.3)
+        self._apply_axis_display_tick_labels(ax_traj)
+        ax_traj.legend(loc="upper right", fontsize=8, ncol=2)
+        fig_traj.tight_layout()
+        fig_traj.savefig(path, dpi=150)
+        plt.close(fig_traj)
+        print(f"  羊轨迹图已保存: {path}")
         
     def run_episode(self, episode_num: int, total_episodes: int):
         print(f"\n{'='*50}")
@@ -702,6 +958,11 @@ class Visualizer:
         
         self.reset_episode()
         self.state.episode_done = False
+        if getattr(self.args, "save_sheep_trajectory_dir", None):
+            os.makedirs(self.args.save_sheep_trajectory_dir, exist_ok=True)
+            self._sheep_traj_buffer = [self._sheep_positions_now()]
+        else:
+            self._sheep_traj_buffer = None
         
         if self.fig is None:
             self.setup_figure()
@@ -720,6 +981,8 @@ class Visualizer:
                 actions_env[i] = action.copy()
 
             obs, reward, done, info = self.env.step(actions_env)
+            if self._sheep_traj_buffer is not None:
+                self._sheep_traj_buffer.append(self._sheep_positions_now())
 
             self.state.current_step += 1
             self.state.total_reward += reward
@@ -757,6 +1020,8 @@ class Visualizer:
         print(f"\nEpisode {episode_num} finished:")
         print(f"  Steps: {self.state.current_step}, Reward: {self.state.total_reward:.3f}")
         print(f"  Result: {'SUCCESS!' if self.state.success else 'FAILED'}")
+        if getattr(self.args, "save_sheep_trajectory_dir", None):
+            self._save_sheep_trajectory_figure(episode_num)
         
         return self.state.success, self.state.total_reward, self.state.current_step
     
@@ -841,6 +1106,8 @@ def main():
         extra_kw["high_level_interval"] = int(args.high_level_interval)
     if getattr(args, "herder_physics_legacy", False):
         extra_kw["herder_physics_legacy"] = True
+    if getattr(args, "no_disk_boundary", False):
+        extra_kw["enforce_disk_boundary"] = False
     hm = {}
     if getattr(args, "herder_init", None):
         hm["herder_init_mode"] = str(args.herder_init)
@@ -848,6 +1115,7 @@ def main():
         hm["herder_slot_assignment"] = str(args.herder_assignment)
     if hm:
         extra_kw["herder_motion"] = hm
+    extra_kw.update(_low_level_sheep_env_kwargs(args))
     env = SheepFlockEnv(
         world_size=tuple(args.world_size),
         num_sheep=args.num_sheep,
@@ -861,6 +1129,13 @@ def main():
         f"Env: formation_delta_mode={env.formation_delta_mode}, "
         f"high_level_interval={env.high_level_interval}, obs_dim={env.obs_dim}"
     )
+    if getattr(args, "low_level_model_dir", None):
+        print(
+            "联合高低层: 已启用 LowLevelMappoBridge（高层策略 + 低层 Graph MAPPO 子步）。"
+            f" low_level_model_dir={args.low_level_model_dir}, "
+            f"low_level_device={args.low_level_device}, "
+            f"low_level_deterministic={not getattr(args, 'low_level_stochastic', False)}"
+        )
     if not env.formation_delta_mode:
         parts = [
             "说明: 当前为**绝对动作**（默认），弧由 a[0:3] 直接解码。",

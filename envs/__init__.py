@@ -12,6 +12,11 @@ from envs.high_level_action import (
     STANCE_RADIUS_MAX,
 )
 from envs.curriculum_env import CurriculumSheepFlockEnv, RandomizedSheepFlockEnv
+from envs.low_level_mappo_bridge import (
+    LowLevelMappoBridge,
+    default_low_level_max_edge_dist,
+    default_low_level_substeps,
+)
 
 __all__ = [
     'SheepEntity',
@@ -24,4 +29,7 @@ __all__ = [
     'STANCE_RADIUS_MAX',
     'CurriculumSheepFlockEnv',
     'RandomizedSheepFlockEnv',
+    'LowLevelMappoBridge',
+    'default_low_level_max_edge_dist',
+    'default_low_level_substeps',
 ]

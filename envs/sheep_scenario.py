@@ -234,6 +234,7 @@ class SheepScenario:
         random_seed: Optional[int] = None,
         use_herder_kinematics: bool = True,
         herder_motion: Optional[Dict[str, Any]] = None,
+        enforce_disk_boundary: bool = True,
     ):
         """
         Args:
@@ -245,6 +246,7 @@ class SheepScenario:
             random_seed: 随机种子
             use_herder_kinematics: False 时机械狗每步直接置于编队目标点（无运动学），便于调试高层队形
             herder_motion: 覆盖默认机械狗运动/分配参数（见 envs.defaults.default_herder_motion_config）
+            enforce_disk_boundary: False 时不把羊/狗位置限制在圆盘内，也不施加圆边界 Boids 力（可任意远离原点）。
         """
         if random_seed is not None:
             np.random.seed(random_seed)
@@ -252,6 +254,7 @@ class SheepScenario:
         self.use_herder_kinematics = use_herder_kinematics
         self.world_size = world_size
         self.world_radius = world_radius_from_size(world_size)
+        self.enforce_disk_boundary = bool(enforce_disk_boundary)
         self.num_sheep = num_sheep
         self.num_herders = num_herders
 
@@ -270,6 +273,12 @@ class SheepScenario:
         self.vectorized_sheep_updates = True
         
         self._init_scenario()
+
+    def _clip_pos(self, position: np.ndarray, limit_radius: float) -> np.ndarray:
+        """启用圆盘边界时裁剪到半径 ``limit_radius``；否则仅转为 float32。"""
+        if not self.enforce_disk_boundary:
+            return np.asarray(position, dtype=np.float32).reshape(2).copy()
+        return clip_position_to_disk(position, float(limit_radius))
     
     def _init_scenario(self):
         """初始化场景元素"""
@@ -280,27 +289,48 @@ class SheepScenario:
     def _init_sheep(self):
         """羊群以「一团」初始化：随机群体中心 + 中心附近小圆盘内均匀撒点。"""
         self.sheep = []
-        R = float(self.world_radius)
-        margin = 1.0
-        lim = R - margin
         n = int(self.num_sheep)
+        Wx, Wy = float(self.world_size[0]), float(self.world_size[1])
 
-        cluster_r = float(
-            min(2.5 + 0.55 * np.sqrt(max(n, 1)), 0.22 * R)
-        )
-        cluster_r = max(cluster_r, min(1.0, 0.06 * R))
-        max_center_r = max(lim - cluster_r - 0.5, 0.12 * R)
-        min_center_r = min(0.26 * R, max_center_r * 0.55)
-        if max_center_r <= min_center_r + 1e-3:
-            min_center_r = max(0.1 * R, max_center_r * 0.3)
-            max_center_r = max(min_center_r + 0.5, lim - cluster_r)
+        if not self.enforce_disk_boundary:
+            hx = max(Wx / 2.0 - 1.0, 1.0)
+            hy = max(Wy / 2.0 - 1.0, 1.0)
+            cluster_r = float(
+                min(2.5 + 0.55 * np.sqrt(max(n, 1)), 0.12 * max(Wx, Wy))
+            )
+            cluster_r = max(cluster_r, 1.0)
+            flock_center = np.array(
+                [
+                    float(np.random.uniform(-hx, hx)),
+                    float(np.random.uniform(-hy, hy)),
+                ],
+                dtype=np.float32,
+            )
+        else:
+            R = float(self.world_radius)
+            margin = 1.0
+            lim = R - margin
 
-        ca = float(np.random.uniform(0.0, 2.0 * np.pi))
-        cr = float(np.random.uniform(min_center_r, max(max_center_r, min_center_r + 1e-3)))
-        flock_center = np.array(
-            [np.cos(ca) * cr, np.sin(ca) * cr], dtype=np.float32
-        )
-        flock_center = clip_position_to_disk(flock_center, max(lim - cluster_r, 0.1 * R))
+            cluster_r = float(
+                min(2.5 + 0.55 * np.sqrt(max(n, 1)), 0.22 * R)
+            )
+            cluster_r = max(cluster_r, min(1.0, 0.06 * R))
+            max_center_r = max(lim - cluster_r - 0.5, 0.12 * R)
+            min_center_r = min(0.26 * R, max_center_r * 0.55)
+            if max_center_r <= min_center_r + 1e-3:
+                min_center_r = max(0.1 * R, max_center_r * 0.3)
+                max_center_r = max(min_center_r + 0.5, lim - cluster_r)
+
+            ca = float(np.random.uniform(0.0, 2.0 * np.pi))
+            cr = float(
+                np.random.uniform(min_center_r, max(max_center_r, min_center_r + 1e-3))
+            )
+            flock_center = np.array(
+                [np.cos(ca) * cr, np.sin(ca) * cr], dtype=np.float32
+            )
+            flock_center = self._clip_pos(
+                flock_center, max(lim - cluster_r, 0.1 * R)
+            )
 
         for _ in range(n):
             ang = float(np.random.uniform(0.0, 2.0 * np.pi))
@@ -308,7 +338,11 @@ class SheepScenario:
             pos = flock_center + np.array(
                 [np.cos(ang) * rad, np.sin(ang) * rad], dtype=np.float32
             )
-            pos = clip_position_to_disk(pos, lim)
+            if self.enforce_disk_boundary:
+                R = float(self.world_radius)
+                margin = 1.0
+                lim = R - margin
+                pos = self._clip_pos(pos, lim)
 
             sheep = SheepEntity(
                 position=pos,
@@ -326,15 +360,33 @@ class SheepScenario:
         n = self.num_herders
         self.herder_positions = np.zeros((n, 2), dtype=np.float32)
         R = float(self.world_radius)
+        Wx, Wy = float(self.world_size[0]), float(self.world_size[1])
         mode = str(self._hm.get("herder_init_mode", "random_disk"))
         if mode == "fixed_arc":
-            base_r = 0.62 * R
+            base_r = 0.62 * (R if self.enforce_disk_boundary else max(Wx, Wy) / 2.0)
             for i in range(n):
                 ang = float(np.pi + (i - (n - 1) / 2.0) * 0.4)
                 p = np.array(
                     [np.cos(ang) * base_r, np.sin(ang) * base_r], dtype=np.float32
                 )
-                self.herder_positions[i] = clip_position_to_disk(p, R - 0.5)
+                self.herder_positions[i] = (
+                    self._clip_pos(p, R - 0.5)
+                    if self.enforce_disk_boundary
+                    else p.astype(np.float32)
+                )
+            return
+        if not self.enforce_disk_boundary:
+            margin = float(self._hm.get("herder_init_margin", 0.5))
+            hx = max(Wx / 2.0 - margin, 1.0)
+            hy = max(Wy / 2.0 - margin, 1.0)
+            for i in range(n):
+                self.herder_positions[i] = np.array(
+                    [
+                        float(np.random.uniform(-hx, hx)),
+                        float(np.random.uniform(-hy, hy)),
+                    ],
+                    dtype=np.float32,
+                )
             return
         margin = float(self._hm.get("herder_init_margin", 0.5))
         r_min_frac = float(self._hm.get("herder_init_r_min_frac", 0.12))
@@ -346,7 +398,7 @@ class SheepScenario:
             r_sq = u * (r_max * r_max - r_min * r_min) + r_min * r_min
             r = float(np.sqrt(max(r_sq, 0.0)))
             p = np.array([np.cos(ang) * r, np.sin(ang) * r], dtype=np.float32)
-            self.herder_positions[i] = clip_position_to_disk(p, R)
+            self.herder_positions[i] = self._clip_pos(p, R)
     
     def _init_target(self):
         """目标固定在圆心。"""
@@ -402,7 +454,7 @@ class SheepScenario:
         
         if not self.use_herder_kinematics:
             for i in range(self.num_herders):
-                self.herder_positions[i] = clip_position_to_disk(
+                self.herder_positions[i] = self._clip_pos(
                     self.herder_targets[i], self.world_radius
                 ).astype(np.float32)
             return
@@ -442,7 +494,7 @@ class SheepScenario:
             target_dist = float(np.linalg.norm(to_target))
 
             if target_dist < reach_eps:
-                self.herder_positions[i] = clip_position_to_disk(
+                self.herder_positions[i] = self._clip_pos(
                     self.herder_positions[i], self.world_radius
                 ).astype(np.float32)
                 continue
@@ -485,7 +537,7 @@ class SheepScenario:
                     self.herder_positions[i] + move_direction * np.float32(step)
                 ).astype(np.float32)
 
-            self.herder_positions[i] = clip_position_to_disk(
+            self.herder_positions[i] = self._clip_pos(
                 self.herder_positions[i], self.world_radius
             ).astype(np.float32)
     
@@ -499,7 +551,7 @@ class SheepScenario:
         positions = np.array(positions, dtype=np.float32)
         
         for i in range(min(len(positions), self.num_herders)):
-            self.herder_positions[i] = clip_position_to_disk(
+            self.herder_positions[i] = self._clip_pos(
                 positions[i], self.world_radius
             ).astype(np.float32)
     
@@ -522,11 +574,10 @@ class SheepScenario:
                 herders=herder_list,
                 world_radius=self.world_radius,
                 weights=self.boids_weights,
+                apply_boundary=self.enforce_disk_boundary,
             )
             sheep.update(dt)
-            sheep.position[:] = clip_position_to_disk(
-                sheep.position, self.world_radius
-            )
+            sheep.position[:] = self._clip_pos(sheep.position, self.world_radius)
 
     def _update_sheep_vectorized(self, dt: float = 2.0):
         """
@@ -548,7 +599,12 @@ class SheepScenario:
         for i in range(n):
             P = np.stack([s.position for s in self.sheep]).astype(np.float32)
             V = np.stack([s.velocity for s in self.sheep]).astype(np.float32)
-            bdf = _boids_boundary_disk_batch(P, self.world_radius, 2.0, max_force)[i]
+            if self.enforce_disk_boundary:
+                bdf = _boids_boundary_disk_batch(
+                    P, self.world_radius, 2.0, max_force
+                )[i]
+            else:
+                bdf = np.zeros(2, dtype=np.float32)
 
             diff = (P[i] - P).astype(np.float32)
             dist_sq = np.sum(diff * diff, axis=1).astype(np.float32)
@@ -573,7 +629,7 @@ class SheepScenario:
             sheep.acceleration[:] = 0.0
             sheep.apply_force(total)
             sheep.update(dt)
-            sheep.position[:] = clip_position_to_disk(
+            sheep.position[:] = self._clip_pos(
                 sheep.position, self.world_radius
             ).astype(np.float32)
     
@@ -900,6 +956,7 @@ class SheepScenario:
             f"num_sheep={self.num_sheep}, "
             f"num_herders={self.num_herders}, "
             f"use_herder_kinematics={self.use_herder_kinematics}, "
+            f"enforce_disk_boundary={self.enforce_disk_boundary}, "
             f"herder_init_mode={self._hm.get('herder_init_mode')}, "
             f"herder_slot_assignment={self._hm.get('herder_slot_assignment')}, "
             f"target={self.target_position})"

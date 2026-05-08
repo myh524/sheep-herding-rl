@@ -94,6 +94,12 @@ def parse_args():
         help='与 train_ppo --herder_physics_legacy 一致',
     )
     parser.add_argument(
+        '--no-disk-boundary',
+        action='store_true',
+        default=False,
+        help='与 train_ppo --no-disk-boundary 一致',
+    )
+    parser.add_argument(
         '--herder_init',
         type=str,
         default=None,
@@ -503,6 +509,8 @@ def main():
         extra_kw["high_level_interval"] = int(args.high_level_interval)
     if getattr(args, "herder_physics_legacy", False):
         extra_kw["herder_physics_legacy"] = True
+    if getattr(args, "no_disk_boundary", False):
+        extra_kw["enforce_disk_boundary"] = False
     hm = {}
     if getattr(args, "herder_init", None):
         hm["herder_init_mode"] = str(args.herder_init)

@@ -24,6 +24,11 @@ from envs.high_level_action import (
     STANCE_RADIUS_MAX,
     STANCE_RADIUS_MIN,
 )
+from envs.low_level_mappo_bridge import (
+    LowLevelMappoBridge,
+    default_low_level_max_edge_dist,
+    default_low_level_substeps,
+)
 
 
 class SheepFlockEnv:
@@ -53,6 +58,16 @@ class SheepFlockEnv:
         high_level_interval: Optional[int] = None,
         herder_motion: Optional[Dict[str, Any]] = None,
         herder_physics_legacy: bool = False,
+        enforce_disk_boundary: bool = True,
+        low_level_model_dir: Optional[str] = None,
+        low_level_substeps: Optional[int] = None,
+        low_level_device: str = "cpu",
+        low_level_world_size: Optional[float] = None,
+        low_level_num_obstacles: int = 1,
+        low_level_max_speed: float = 2.0,
+        low_level_max_edge_dist: Optional[float] = None,
+        low_level_use_shepherd: bool = True,
+        low_level_deterministic: bool = True,
     ):
         """
         初始化环境
@@ -76,6 +91,16 @@ class SheepFlockEnv:
             high_level_interval: 每 N 个 env step 刷新编队目标；None 时增量模式默认 1，绝对动作默认 5
             herder_motion: 覆盖 envs.defaults 中机械狗运动/分配参数
             herder_physics_legacy: True 时等价于旧版固定初值、恒等槽位分配、无牧者间斥力
+            enforce_disk_boundary: False 时羊与机械狗不受圆盘场地约束（无裁剪、无圆边界 Boids 力）。
+            low_level_model_dir: 若设置，用 InforMARL 的 Graph MAPPO 权重（目录含 actor.pt）
+                驱动牧者子步，替代 SheepScenario.update_herders 势场积分。
+            low_level_substeps: 每个主环境步内低层步数；None 时 round(dt / 0.1)。
+            low_level_device: 低层策略推理设备（cpu / cuda）。
+            low_level_world_size: 低层 MPE 方形边长；None 时用 min(world_size)。
+            low_level_num_obstacles / low_level_max_speed: 与低层训练场景对齐。
+            low_level_max_edge_dist: GNN 连边距离阈值；None 时用 default_low_level_max_edge_dist(low_world_size)。
+            low_level_use_shepherd: 低层是否启用牧羊障碍与奖励语义。
+            low_level_deterministic: 低层策略是否确定性动作。
         """
         self.world_size = world_size
         self.num_sheep = num_sheep
@@ -108,6 +133,30 @@ class SheepFlockEnv:
             legacy=bool(herder_physics_legacy),
         )
 
+        self._low_level_model_dir = low_level_model_dir
+        self._low_level_substeps = (
+            int(low_level_substeps)
+            if low_level_substeps is not None
+            else default_low_level_substeps(dt)
+        )
+        self._low_level_device = str(low_level_device)
+        self._low_level_world_size = (
+            float(low_level_world_size)
+            if low_level_world_size is not None
+            else float(min(world_size[0], world_size[1]))
+        )
+        self._low_level_num_obstacles = int(low_level_num_obstacles)
+        self._low_level_max_speed = float(low_level_max_speed)
+        self._low_level_max_edge_dist = (
+            float(low_level_max_edge_dist)
+            if low_level_max_edge_dist is not None
+            else default_low_level_max_edge_dist(self._low_level_world_size)
+        )
+        self._low_level_use_shepherd = bool(low_level_use_shepherd)
+        self._low_level_deterministic = bool(low_level_deterministic)
+        self._low_bridge: Optional[LowLevelMappoBridge] = None
+        self.enforce_disk_boundary = bool(enforce_disk_boundary)
+
         self.scenario = SheepScenario(
             world_size=world_size,
             num_sheep=num_sheep,
@@ -115,6 +164,7 @@ class SheepFlockEnv:
             random_seed=random_seed,
             use_herder_kinematics=use_herder_kinematics,
             herder_motion=self.herder_motion,
+            enforce_disk_boundary=self.enforce_disk_boundary,
         )
         
         self.action_decoder = HighLevelAction()
@@ -132,7 +182,27 @@ class SheepFlockEnv:
         self._seed = random_seed
         if random_seed is not None:
             np.random.seed(random_seed)
-    
+
+    def _ensure_low_level_bridge(self) -> None:
+        if self._low_level_model_dir is None:
+            return
+        if self._low_bridge is not None and self._low_bridge.num_agents != self.num_herders:
+            self._low_bridge = None
+        if self._low_bridge is not None:
+            return
+        seed = int(self.random_seed) if self.random_seed is not None else 0
+        self._low_bridge = LowLevelMappoBridge(
+            self._low_level_model_dir,
+            self.num_herders,
+            self._low_level_world_size,
+            num_obstacles=self._low_level_num_obstacles,
+            max_speed=self._low_level_max_speed,
+            max_edge_dist=self._low_level_max_edge_dist,
+            use_shepherd_env=self._low_level_use_shepherd,
+            device=self._low_level_device,
+            seed=seed,
+        )
+
     def _setup_spaces(self):
         """Set up observation and action spaces"""
         # 8 维羊群相关 + 2 维机械狗**质心**相对**羊质心**的极坐标（与 N 无关）
@@ -197,6 +267,9 @@ class SheepFlockEnv:
 
         self._reward_components = {}
 
+        if self._low_bridge is not None:
+            self._low_bridge.reset_rnn()
+
         return self._get_obs()
     
     def get_shared_obs(self) -> np.ndarray:
@@ -237,8 +310,36 @@ class SheepFlockEnv:
         if (self.step_count - 1) % self.high_level_interval == 0:
             target_positions = self._sample_herder_positions(actions)
             self.scenario.set_herder_targets(target_positions)
-        
-        self.scenario.update_herders(self.dt)
+
+        if self._low_level_model_dir:
+            self._ensure_low_level_bridge()
+            if self._low_bridge is None:
+                raise RuntimeError("低层桥接初始化失败")
+            if not (
+                hasattr(self.scenario, "herder_targets")
+                and self.scenario.herder_targets is not None
+            ):
+                raise RuntimeError("herder_targets 未设置；检查 high_level_interval 与 set_herder_targets 逻辑")
+            flock_center = self.scenario.get_flock_center()
+            new_pos = self._low_bridge.run_substeps(
+                self.scenario.herder_positions,
+                self.scenario.herder_targets,
+                flock_center,
+                self._low_level_substeps,
+                deterministic=self._low_level_deterministic,
+            )
+            R = float(self.scenario.world_radius)
+            for i in range(self.num_herders):
+                if self.enforce_disk_boundary:
+                    self.scenario.herder_positions[i] = clip_position_to_disk(
+                        new_pos[i], R
+                    ).astype(np.float32)
+                else:
+                    self.scenario.herder_positions[i] = np.asarray(
+                        new_pos[i], dtype=np.float32
+                    ).reshape(2)
+        else:
+            self.scenario.update_herders(self.dt)
         
         self.scenario.update_sheep(self.dt)
         
@@ -344,10 +445,11 @@ class SheepFlockEnv:
                     pos = pos + correction
                     positions[j] = positions[j] - correction
             
-            R = float(self.scenario.world_radius)
-            lim = max(R - flock_safe_distance, 0.5)
-            pos = clip_position_to_disk(pos, lim)
-            
+            if self.enforce_disk_boundary:
+                R = float(self.scenario.world_radius)
+                lim = max(R - flock_safe_distance, 0.5)
+                pos = clip_position_to_disk(pos, lim)
+
             positions[i] = pos
         
         return positions
@@ -569,6 +671,7 @@ class SheepFlockEnv:
             'world_radius': float(self.scenario.world_radius),
             'formation_delta_mode': self.formation_delta_mode,
             'high_level_interval': self.high_level_interval,
+            'enforce_disk_boundary': self.enforce_disk_boundary,
         }
 
 
