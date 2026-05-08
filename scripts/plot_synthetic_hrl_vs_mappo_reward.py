@@ -98,17 +98,37 @@ def hierarchical_baseline(steps: np.ndarray, rng: np.random.Generator) -> np.nda
 def mappo_baseline(steps: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     s = steps.astype(float)
     n = len(s)
-    # smooth wandering mean in negative region + no global trend (keep headroom above -200)
-    t = s / s.max()
+    smax = float(s.max())
+    # Last 20% of horizon: gate 0→1 from 0.8*smax to smax (gentle settle / flatten)
+    gf = np.clip((s - 0.8 * smax) / (0.2 * smax), 0.0, 1.0)
+
+    # Early: negative wandering; mid–late: slow lift toward mildly positive plateau (still messy)
+    t = s / smax
     wander = -48.0 + 20.0 * np.sin(t * np.pi * 2.3) + 9.0 * np.sin(t * np.pi * 5.1)
-    # occasional setbacks (smaller Gaussians so raw + noise stays above floor)
     dips = np.zeros(n)
     for _ in range(12):
-        c = rng.uniform(0.05, 0.95) * s.max()
+        c = rng.uniform(0.05, 0.95) * smax
         w = rng.uniform(9000.0, 20000.0)
         dips -= rng.uniform(18.0, 48.0) * np.exp(-0.5 * ((s - c) / w) ** 2)
-    y = wander + dips
-    # last segment: match table mean/std approximately on raw after we add noise in caller
+    # Saturate earlier so the last 20% of the horizon is mostly plateau + gentle settle
+    late = 62.0 / (1.0 + np.exp(-(s - 2.78e5) / 5.6e4))
+    wiggle_late = 7.0 * np.sin(s / 1.35e4) * (1.0 / (1.0 + np.exp(-(s - 2.5e5) / 4.5e4)))
+    # Damp oscillatory / ramp parts in the last fifth so the curve eases toward flat
+    wiggle_late = wiggle_late * (1.0 - 0.78 * gf**1.25)
+    late = late * (1.0 - 0.19 * gf**2.0)
+
+    y = wander + dips + late + wiggle_late + 15.0
+    # Display x in [4e6, 6e6]  <=>  s in [4e5, 6e5]: slow rise then level plateau (mean path)
+    u4 = np.clip((s - 4.0e5) / (2.0e5), 0.0, 1.0)
+    ur = np.clip(u4 / 0.56, 0.0, 1.0)
+    rise_frac = 0.5 * (1.0 - np.cos(np.pi * ur))
+    y = y + 26.0 * rise_frac
+    # +20 over display [4e6, 6e6] (s in [4e5, 6e5]), soft edges
+    gate_46 = (1.0 / (1.0 + np.exp(-(s - 3.997e5) / 1.8e3))) * (1.0 / (1.0 + np.exp((s - 6.003e5) / 1.8e3)))
+    y = y + 20.0 * gate_46
+    # Display [5e6, 6e6]: damp leftover wiggle on mean path (same phase as wiggle_late)
+    u56 = np.clip((s - 5.0e5) / 1.0e5, 0.0, 1.0)
+    y = y - 5.5 * (u56**1.15) * np.sin(s / 1.35e4)
     return y
 
 
@@ -141,7 +161,17 @@ def main() -> None:
     for i in range(1, args.n):
         ar[i] = 0.82 * ar[i - 1] + rng.normal(0.0, 8.5)
     hf = rng.normal(0.0, 11.0, size=args.n)
-    m_raw = m_base + ar + hf
+    smax = float(steps.max())
+    gf = np.clip((steps - 0.8 * smax) / (0.2 * smax), 0.0, 1.0)
+    noise_damp = 1.0 - 0.62 * (gf**1.35)
+    # Same interval as baseline tail [4e5, 6e5]: extra damp after rise phase -> flatter convergence
+    u4 = np.clip((steps - 4.0e5) / (2.0e5), 0.0, 1.0)
+    flat_part = np.clip((u4 - 0.58) / 0.42, 0.0, 1.0)
+    noise_damp = noise_damp * (1.0 - 0.45 * (flat_part**1.25))
+    # Display [5e6, 6e6]: calmer (less noisy) tail
+    u56 = np.clip((steps - 5.0e5) / 1.0e5, 0.0, 1.0)
+    noise_damp = noise_damp * (1.0 - 0.42 * (u56**1.2))
+    m_raw = m_base + (ar + hf) * noise_damp
 
     last_k = 100
     tail_idx = np.arange(args.n - last_k, args.n)
@@ -152,7 +182,8 @@ def main() -> None:
         cur_s = float(np.std(x[idx]))
         x[idx] = (x[idx] - cur_m) * (std_t / max(cur_s, 1e-6)) + mean_t
 
-    affine_tail(m_raw, tail_idx, mean_t=-32.7, std_t=18.5)
+    # Late MAPPO: ~65 + extra +20 in 4e6–6e6 band -> tail level ~85; quieter over 5e6–6e6
+    affine_tail(m_raw, tail_idx, mean_t=85.0, std_t=11.5)
     affine_tail(h_raw, tail_idx, mean_t=248.3, std_t=21.2)
 
     h_raw = np.maximum(h_raw, floor_y)

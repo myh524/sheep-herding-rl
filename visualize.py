@@ -330,6 +330,20 @@ def parse_args():
         help='若指定目录，则每个 episode 结束后在该目录保存一张「全部羊轨迹」PNG（自动创建目录）',
     )
     parser.add_argument(
+        '--save-visual-every',
+        type=int,
+        default=None,
+        metavar='K',
+        help='若为正整数，则每 K 个环境 step 将当前 matplotlib 界面保存为 PNG（需已 render）',
+    )
+    parser.add_argument(
+        '--save-visual-dir',
+        type=str,
+        default=None,
+        metavar='DIR',
+        help='快照保存根目录；不设则使用仓库内 figures/viz_snapshots/。若以 /figures/ 开头会按仓库内 figures/ 解析（勿与根目录 /figures 混淆）',
+    )
+    parser.add_argument(
         '--force_headless',
         action='store_true',
         help='强制使用无窗口 Agg 后端（需在命令中放在靠前位置以便生效，或设置 MPLBACKEND=Agg）',
@@ -518,6 +532,53 @@ class Visualizer:
         self._interactive = _matplotlib_is_interactive()
         self._gui_shown = False
         self._sheep_traj_buffer: Optional[List[np.ndarray]] = None
+        self._visual_snapshot_dir: Optional[str] = None
+
+    def _init_visual_snapshots_if_needed(self) -> None:
+        k = getattr(self.args, "save_visual_every", None)
+        if k is None or int(k) <= 0:
+            self._visual_snapshot_dir = None
+            return
+
+        ns = int(self.env.num_sheep)
+        nh = int(self.env.num_herders)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        sub = f"sheep{ns}_herder{nh}_{stamp}"
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        root = getattr(self.args, "save_visual_dir", None)
+        if not root:
+            parent = os.path.join(repo_root, "figures", "viz_snapshots")
+        else:
+            raw = str(root).strip()
+            # 误写 /figures/... 会被当成根目录 /figures（常无写权限），改为仓库内 figures/...
+            if raw == "/figures" or raw.startswith("/figures/"):
+                rel = raw[1:].lstrip(os.sep)
+                parent = os.path.normpath(os.path.join(repo_root, rel))
+            else:
+                parent = os.path.abspath(raw)
+        self._visual_snapshot_dir = os.path.join(parent, sub)
+        os.makedirs(self._visual_snapshot_dir, exist_ok=True)
+        print(
+            f"视觉快照: 每 {int(k)} 步保存 → {self._visual_snapshot_dir}",
+            flush=True,
+        )
+
+    def _maybe_save_visual_snapshot(self, episode_num: int) -> None:
+        k = getattr(self.args, "save_visual_every", None)
+        if k is None or int(k) <= 0 or self._visual_snapshot_dir is None:
+            return
+        if self.fig is None:
+            return
+        if int(self.state.current_step) % int(k) != 0:
+            return
+        ns = int(self.env.num_sheep)
+        nh = int(self.env.num_herders)
+        name = (
+            f"sheep{ns}_herder{nh}_ep{int(episode_num):02d}_"
+            f"step{int(self.state.current_step):06d}.png"
+        )
+        path = os.path.join(self._visual_snapshot_dir, name)
+        self.fig.savefig(path, dpi=150)
 
     def _arena_view(self):
         """返回 (xlim, ylim, 是否绘制圆盘边界)。取景按真实 world_size / world_radius；刻度读数见 _apply_axis_display_tick_labels。"""
@@ -860,6 +921,15 @@ class Visualizer:
                 )
             )
         target = self.env.scenario.get_target_position()
+        ax_traj.add_patch(
+            patches.Circle(
+                (float(target[0]), float(target[1])),
+                5.0,
+                color="green",
+                alpha=0.3,
+                zorder=2,
+            )
+        )
         ax_traj.scatter(
             float(target[0]),
             float(target[1]),
@@ -989,6 +1059,7 @@ class Visualizer:
             self.state.action_history.append(action.copy())
 
             self.render_env()
+            self._maybe_save_visual_snapshot(episode_num)
 
             if self._interactive and not self._gui_shown:
                 plt.show(block=False)
@@ -1026,6 +1097,7 @@ class Visualizer:
         return self.state.success, self.state.total_reward, self.state.current_step
     
     def run(self):
+        self._init_visual_snapshots_if_needed()
         successes = []
         total_rewards = []
         total_steps = []

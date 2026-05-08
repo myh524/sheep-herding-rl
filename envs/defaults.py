@@ -115,6 +115,42 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "target_success_rate": 0.8,
         "min_episodes": 200,
     },
+    {
+        "name": "Stage 3: Target",
+        "num_sheep": 15,
+        "num_herders": 4,
+        "world_size": (120.0, 120.0),
+        "episode_length": 300,
+        "target_success_rate": 0.8,
+        "min_episodes": 200,
+    },
+    {
+        "name": "Stage 4: Target",
+        "num_sheep": 20,
+        "num_herders": 4,
+        "world_size": (120.0, 120.0),
+        "episode_length": 300,
+        "target_success_rate": 0.8,
+        "min_episodes": 200,
+    },
+    {
+        "name": "Stage 5: Target",
+        "num_sheep": 25,
+        "num_herders": 5,
+        "world_size": (140.0, 140.0),
+        "episode_length": 300,
+        "target_success_rate": 0.8,
+        "min_episodes": 200,
+    },
+    {
+        "name": "Stage 6: Target",
+        "num_sheep": 30,
+        "num_herders": 5,
+        "world_size": (140.0, 140.0),
+        "episode_length": 350,
+        "target_success_rate": 0.8,
+        "min_episodes": 200,
+    },
 ]
 
 # SheepFlockEnv._compute_reward 稠密奖励系数（详见该函数 docstring）
