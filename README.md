@@ -23,7 +23,7 @@ python train_hierarchical.py \
 
 使用根目录 **`visualize.py`**（或直接跑 **`scripts/visualize.sh`**）。常用要点：
 
-- **`--save-sheep-trajectory-dir DIR`**：每个 episode 结束后在 `DIR` 下保存一张「全体羊轨迹 + 平滑质心」PNG；若文件已存在会自动加 `_1`、`_2`… 不覆盖。
+- **`--save-sheep-trajectory-dir DIR`**：每个 episode 结束后在 `DIR` 下保存一张「全体羊轨迹 + 平滑质心」PNG；若文件已存在会自动加 `_1`、`_2`… 不覆盖。误写 **`/figures/...`** 时也会按仓库内 **`figures/...`** 解析（与 `--save-visual-dir` 相同）。
 - **`--save-visual-every K`**（`K` 为正整数）：每 `K` 个环境 step 在 **`render_env` 之后**保存当前整图 PNG。首次启用时在 **`--save-visual-dir`**（可选）下自动新建子目录 `sheep{N}_herder{H}_时间戳/`；未指定时默认根目录为仓库内 **`figures/viz_snapshots/`**。文件名：`sheep{N}_herder{H}_ep{episode}_step{步数}.png`。  
   若误写成根路径 **`/figures/...`**（会触发权限错误），程序会改为使用**仓库根下**的 **`figures/...`**；推荐直接写 **`figures/my_viz_snapshots`** 或绝对路径如 **`$PWD/figures/...`**。
 - 与训练一致时按需加：`--formation_delta`、`--no-disk-boundary`、`--herder_teleport`（狗瞬移到编队槽位）、`--high_level_interval` 等；详见 `python visualize.py -h`。
@@ -45,28 +45,41 @@ bash scripts/visualize.sh /path/to/model.pt
 - **平均完成步数**（默认到达目标后提前结束 episode，步数才有区分度；见下）
 - **episode 结束时羊群扩散度**（`flock_spread`：羊相对质心距离的样本标准差；脚本同时给出「仅成功」与「全体」均值）
 
-实现：**[`evaluate_generalization.py`](evaluate_generalization.py)**（根目录）。便捷封装：**[`scripts/evaluate_generalization.sh`](scripts/evaluate_generalization.sh)**。
+实现：**[`evaluate_generalization.py`](evaluate_generalization.py)**（根目录）、绘图模块 **[`plot_generalization.py`](plot_generalization.py)**。便捷封装：**[`scripts/evaluate_generalization.sh`](scripts/evaluate_generalization.sh)**；仅重绘：**[`scripts/plot_generalization_json.py`](scripts/plot_generalization_json.py)**。
 
 默认网格：羊 **5, 10, 15, 20, 25** × 狗 **3, 4, 5, 6**。自定义列表见 `python3 evaluate_generalization.py -h`（`--sheep_counts`、`--herder_counts`）。
+
+**默认动力学（与常见训练一致）**：**不启用圆盘边界**（无 `--disk-boundary` 即等价原 `--no-disk-boundary`）、**`--high_level_interval` 默认为 3**、**不传 `--herder_teleport`**（机械狗为**势场运动学**，非瞬移）。若需圆盘约束，显式加 `--disk-boundary`。
 
 ```bash
 # 直接调用 Python（推荐先看 -h）
 python3 evaluate_generalization.py \
   --model_path /path/to/model.pt \
   --num_episodes 50 \
-  --output_json figures/generalization/grid_eval.json
+  --output_json figures/generalization/grid_eval.json \
+  --output_figures figures/generalization/plots
+
+# 仅根据已有 JSON 重绘折线图（无需重跑评估）
+python3 scripts/plot_generalization_json.py figures/generalization/grid_eval.json \
+  -o figures/generalization/plots_redraw
 
 # 或使用脚本：参数为 <模型> [每格episode数] [JSON路径，可省略]
 bash scripts/evaluate_generalization.sh /path/to/model.pt 50 figures/generalization/grid_eval.json
+# 折线图：GEN_OUTPUT_FIGURES=figures/generalization/plots bash scripts/evaluate_generalization.sh …
 ```
 
-与训练 / 单次评估一致时，按需增加与 `evaluate_policy.py` 相同的开关（示例：`--herder_teleport`、`--high_level_interval`、`--no-disk-boundary`）。**`formation_delta` 一般不必手写**：`evaluate_generalization.py` 会从 checkpoint 推断观测维（10 或 13），若为 13 维则自动打开 `formation_delta`，避免权重与观测维不一致。
+折线图说明：每个指标一张宽图，**左**为横轴羊群数量 N、多条线对应不同机械狗数 H；**右**为横轴机械狗数、多条线对应不同羊群规模。生成文件包括 `gen_lines_success.png`、`gen_lines_steps_success.png`、`gen_lines_spread_success.png`，以及全体回合的 `gen_lines_steps_all.png`、`gen_lines_spread_all.png`（可选前缀 `--figure_prefix`）。图中坐标轴与图例为**英文**（`N`/`H`），避免无中文字体环境缺字。写入 JSON 时会在字段 `figure_paths` 中记录绝对路径。
+
+**`formation_delta` 一般不必手写**：脚本会从 checkpoint 推断观测维（10 或 13），若为 13 维则自动打开 `formation_delta`，避免权重与观测维不一致。
+
+其它与 `evaluate_policy.py` 一致的开关仍可按需追加（例如消融时 `--herder_teleport`、`--disk-boundary`）。
 
 Shell 脚本可通过环境变量传入部分常用项，例如：
 
 - `GEN_SEED=0`、`GEN_PER_COMBO_SEED=1`：可复现性
 - `GEN_RUN_FULL_HORIZON=1`：不因到达目标提前结束（每 episode 固定跑满 `--episode_length`）
-- `GEN_FORMATION_DELTA=1`、`GEN_HERDER_TELEPORT=1`、`GEN_NO_DISK_BOUNDARY=1`、`GEN_HIGH_LEVEL_INTERVAL=3`
+- `GEN_FORMATION_DELTA=1`：强制编队增量观测（通常不必）
+- `GEN_DISK_BOUNDARY=1`：启用圆盘边界；`GEN_HERDER_TELEPORT=1`：瞬移狗（非默认）；`GEN_HIGH_LEVEL_INTERVAL=5`：覆盖默认 3
 
 完整参数仍以 `python3 evaluate_generalization.py -h` 为准。
 
@@ -85,7 +98,6 @@ Shell 脚本可通过环境变量传入部分常用项，例如：
 
 ```bash
 python3 scripts/generate_synthetic_failure_trajectories.py --num_plots 4
-python3 scripts/generate_synthetic_curved_overshoot_trajectories.py --num_plots 4
 python3 scripts/plot_synthetic_hrl_vs_mappo_reward.py
 python3 scripts/plot_synthetic_hrl_vs_mappo_success_rate.py
 ```

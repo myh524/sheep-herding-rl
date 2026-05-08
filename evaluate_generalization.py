@@ -11,7 +11,8 @@
 
 用法示例：
   python evaluate_generalization.py --model_path runs/xxx/model.pt \\
-      --num_episodes 50 --seed 0 --output_json results/gen.json
+      --num_episodes 50 --seed 0 --output_json results/gen.json \\
+      --output_figures results/gen_plots
 
 注意：策略网络 actor 输入维与羊/狗数量无关（观测已归一化），但训练时若未见过某规模，
 泛化可能较差；机械狗数量不改变 actor 观测维，可与训练时不同。
@@ -21,6 +22,9 @@
 
 默认在羊群进入目标阈值后提前结束 episode，以便「完成步数」在成功轨迹上有意义；
 若需与「始终跑满 horizon」的评估一致，请传入 --run_full_horizon。
+
+默认动力学与常用训练对齐：**不启用圆盘边界**（等价原 `--no-disk-boundary`）、
+**`--high_level_interval 3`**、**不启用 `--herder_teleport`**（机械狗用势场运动学，非瞬移）。
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ from evaluate_policy import (
     load_model,
     run_episode,
 )
+from plot_generalization import save_generalization_line_figures
 
 
 DEFAULT_SHEEP_GRID = (5, 10, 15, 20, 25)
@@ -299,9 +304,26 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="设置后不因到达目标提前结束（每 episode 固定跑满 episode_length）",
     )
-    p.add_argument("--herder_teleport", action="store_true", default=False)
+    p.add_argument(
+        "--herder_teleport",
+        action="store_true",
+        default=False,
+        help="机械狗瞬移到编队点（关闭势场运动学）。默认关闭，即低层为势场动力学。",
+    )
     p.add_argument("--herder_physics_legacy", action="store_true", default=False)
-    p.add_argument("--no-disk-boundary", action="store_true", default=False)
+    p.add_argument(
+        "--disk-boundary",
+        action="store_true",
+        default=False,
+        help="启用圆盘场地裁剪与边界斥力。默认关闭（与常用无圆盘边界训练一致）。",
+    )
+    p.add_argument(
+        "--no-disk-boundary",
+        dest="no_disk_boundary_flag",
+        action="store_true",
+        default=False,
+        help="兼容其它脚本的显式写法；默认已是「无圆盘边界」，可不传。勿与 --disk-boundary 同用。",
+    )
     p.add_argument("--herder_init", type=str, default=None, choices=["random_disk", "fixed_arc"])
     p.add_argument("--herder_assignment", type=str, default=None, choices=["min_cost", "ordered"])
     p.add_argument(
@@ -313,7 +335,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--formation_delta_theta_max_deg", type=float, default=FORMATION_DELTA_THETA_MAX_DEG)
     p.add_argument("--formation_delta_radius_max", type=float, default=FORMATION_DELTA_RADIUS_MAX)
     p.add_argument("--formation_delta_coverage_max", type=float, default=FORMATION_DELTA_COVERAGE_MAX)
-    p.add_argument("--high_level_interval", type=int, default=None)
+    p.add_argument(
+        "--high_level_interval",
+        type=int,
+        default=3,
+        help="高层编队决策刷新间隔（环境步）。默认 3。",
+    )
     p.add_argument("--hidden_size", type=int, default=256)
     p.add_argument("--layer_N", type=int, default=3)
     p.add_argument("--use_ReLU", action="store_true", default=True)
@@ -328,12 +355,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use_improved", action="store_true", default=False)
     p.add_argument("--stacked_frames", type=int, default=1)
     p.add_argument("--output_json", type=str, default=None, help="汇总结果 JSON 路径")
+    p.add_argument(
+        "--output_figures",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="将指标画成折线图（双视角）并保存 PNG 到此目录；可与 --output_json 同时使用",
+    )
+    p.add_argument(
+        "--figure_prefix",
+        type=str,
+        default="",
+        help="PNG 文件名前缀（建议以 _ 结尾或脚本会自动补 _）",
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     end_on_target = not bool(args.run_full_horizon)
+    if bool(args.disk_boundary) and bool(getattr(args, "no_disk_boundary_flag", False)):
+        raise SystemExit("错误: 不能同时使用 --disk-boundary 与 --no-disk-boundary。")
+    no_disk_boundary = not bool(args.disk_boundary)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     world_size = (float(args.world_size[0]), float(args.world_size[1]))
@@ -359,14 +402,14 @@ def main() -> None:
         seed=args.seed,
         herder_teleport=args.herder_teleport,
         herder_physics_legacy=args.herder_physics_legacy,
-        no_disk_boundary=args.no_disk_boundary,
+        no_disk_boundary=no_disk_boundary,
         herder_init=args.herder_init,
         herder_assignment=args.herder_assignment,
         formation_delta=use_formation_delta,
         formation_delta_theta_max_deg=args.formation_delta_theta_max_deg,
         formation_delta_radius_max=args.formation_delta_radius_max,
         formation_delta_coverage_max=args.formation_delta_coverage_max,
-        high_level_interval=args.high_level_interval,
+        high_level_interval=int(args.high_level_interval),
         end_episode_when_at_target=end_on_target,
     )
 
@@ -383,6 +426,11 @@ def main() -> None:
     print(f"模型: {args.model_path}")
     _od = obs_dim_ckpt if obs_dim_ckpt is not None else "未知"
     print(f"观测维(推断): {_od}；formation_delta={use_formation_delta}")
+    print(
+        f"环境: high_level_interval={int(args.high_level_interval)}；"
+        f"圆盘边界={'启用' if args.disk_boundary else '关闭'}；"
+        f"机械狗={'瞬移' if args.herder_teleport else '势场运动学'}"
+    )
     print(
         f"网格: 羊 {sheep_list} × 狗 {herder_list}；每格 {args.num_episodes} episodes；"
         f"到达目标提前结束={end_on_target}"
@@ -402,14 +450,14 @@ def main() -> None:
                 seed=combo_seed,
                 herder_teleport=args.herder_teleport,
                 herder_physics_legacy=args.herder_physics_legacy,
-                no_disk_boundary=args.no_disk_boundary,
+                no_disk_boundary=no_disk_boundary,
                 herder_init=args.herder_init,
                 herder_assignment=args.herder_assignment,
                 formation_delta=use_formation_delta,
                 formation_delta_theta_max_deg=args.formation_delta_theta_max_deg,
                 formation_delta_radius_max=args.formation_delta_radius_max,
                 formation_delta_coverage_max=args.formation_delta_coverage_max,
-                high_level_interval=args.high_level_interval,
+                high_level_interval=int(args.high_level_interval),
                 end_episode_when_at_target=end_on_target,
             )
 
@@ -469,18 +517,41 @@ def main() -> None:
         "矩阵：成功 episode 结束时平均羊群扩散度",
     )
 
+    saved_figure_paths: Optional[List[str]] = None
+    if args.output_figures:
+        fig_title = os.path.basename(args.model_path)
+        saved_figure_paths = save_generalization_line_figures(
+            args.output_figures,
+            sheep_list,
+            herder_list,
+            all_records,
+            figure_prefix=args.figure_prefix,
+            suptitle=fig_title,
+        )
+        print("\n折线图已保存:")
+        for fp in saved_figure_paths:
+            print(f"  {fp}")
+
     if args.output_json:
         out = {
             "model_path": os.path.abspath(args.model_path),
             "device": str(device),
             "obs_dim_inferred": obs_dim_ckpt,
             "formation_delta": use_formation_delta,
+            "high_level_interval": int(args.high_level_interval),
+            "enforce_disk_boundary": bool(args.disk_boundary),
+            "herder_teleport": bool(args.herder_teleport),
             "end_episode_when_at_target": end_on_target,
             "episode_length": args.episode_length,
             "world_size": list(world_size),
             "sheep_counts": sheep_list,
             "herder_counts": herder_list,
             "num_episodes_per_cell": args.num_episodes,
+            "figure_paths": (
+                [os.path.abspath(p) for p in saved_figure_paths]
+                if saved_figure_paths
+                else None
+            ),
             "cells": all_records,
         }
         path = os.path.abspath(args.output_json)

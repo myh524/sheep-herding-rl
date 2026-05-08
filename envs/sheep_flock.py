@@ -91,17 +91,18 @@ class SheepFlockEnv:
             high_level_interval: 每 N 个 env step 刷新编队目标；None 时增量模式默认 1，绝对动作默认 5
             herder_motion: 覆盖 envs.defaults 中机械狗运动/分配参数
             herder_physics_legacy: True 时等价于旧版固定初值、恒等槽位分配、无牧者间斥力
-            enforce_disk_boundary: False 时羊与机械狗不受圆盘场地约束（无裁剪、无圆边界 Boids 力）。
-            low_level_model_dir: 若设置，用 InforMARL 的 Graph MAPPO 权重（目录含 actor.pt）
+            enforce_disk_boundary: 传入 SheepScenario；False 时不把羊/狗限制在圆盘内
+            low_level_model_dir: 若设置，用 mappo_layered_shepherd 的 Graph MAPPO 权重（目录含 actor.pt）
                 驱动牧者子步，替代 SheepScenario.update_herders 势场积分。
             low_level_substeps: 每个主环境步内低层步数；None 时 round(dt / 0.1)。
             low_level_device: 低层策略推理设备（cpu / cuda）。
             low_level_world_size: 低层 MPE 方形边长；None 时用 min(world_size)。
             low_level_num_obstacles / low_level_max_speed: 与低层训练场景对齐。
-            low_level_max_edge_dist: GNN 连边距离阈值；None 时用 default_low_level_max_edge_dist(low_world_size)。
+            low_level_max_edge_dist: 低层 GNN 连边半径；None 时用 default_low_level_max_edge_dist(world_size)
             low_level_use_shepherd: 低层是否启用牧羊障碍与奖励语义。
             low_level_deterministic: 低层策略是否确定性动作。
         """
+        self.enforce_disk_boundary = bool(enforce_disk_boundary)
         self.world_size = world_size
         self.num_sheep = num_sheep
         self.num_herders = num_herders
@@ -150,12 +151,11 @@ class SheepFlockEnv:
         self._low_level_max_edge_dist = (
             float(low_level_max_edge_dist)
             if low_level_max_edge_dist is not None
-            else default_low_level_max_edge_dist(self._low_level_world_size)
+            else None
         )
         self._low_level_use_shepherd = bool(low_level_use_shepherd)
         self._low_level_deterministic = bool(low_level_deterministic)
         self._low_bridge: Optional[LowLevelMappoBridge] = None
-        self.enforce_disk_boundary = bool(enforce_disk_boundary)
 
         self.scenario = SheepScenario(
             world_size=world_size,
@@ -191,13 +191,18 @@ class SheepFlockEnv:
         if self._low_bridge is not None:
             return
         seed = int(self.random_seed) if self.random_seed is not None else 0
+        max_edge = (
+            float(self._low_level_max_edge_dist)
+            if self._low_level_max_edge_dist is not None
+            else default_low_level_max_edge_dist(self._low_level_world_size)
+        )
         self._low_bridge = LowLevelMappoBridge(
             self._low_level_model_dir,
             self.num_herders,
             self._low_level_world_size,
             num_obstacles=self._low_level_num_obstacles,
             max_speed=self._low_level_max_speed,
-            max_edge_dist=self._low_level_max_edge_dist,
+            max_edge_dist=max_edge,
             use_shepherd_env=self._low_level_use_shepherd,
             device=self._low_level_device,
             seed=seed,
@@ -330,14 +335,9 @@ class SheepFlockEnv:
             )
             R = float(self.scenario.world_radius)
             for i in range(self.num_herders):
-                if self.enforce_disk_boundary:
-                    self.scenario.herder_positions[i] = clip_position_to_disk(
-                        new_pos[i], R
-                    ).astype(np.float32)
-                else:
-                    self.scenario.herder_positions[i] = np.asarray(
-                        new_pos[i], dtype=np.float32
-                    ).reshape(2)
+                self.scenario.herder_positions[i] = clip_position_to_disk(
+                    new_pos[i], R
+                ).astype(np.float32)
         else:
             self.scenario.update_herders(self.dt)
         
@@ -445,11 +445,10 @@ class SheepFlockEnv:
                     pos = pos + correction
                     positions[j] = positions[j] - correction
             
-            if self.enforce_disk_boundary:
-                R = float(self.scenario.world_radius)
-                lim = max(R - flock_safe_distance, 0.5)
-                pos = clip_position_to_disk(pos, lim)
-
+            R = float(self.scenario.world_radius)
+            lim = max(R - flock_safe_distance, 0.5)
+            pos = clip_position_to_disk(pos, lim)
+            
             positions[i] = pos
         
         return positions
@@ -671,7 +670,6 @@ class SheepFlockEnv:
             'world_radius': float(self.scenario.world_radius),
             'formation_delta_mode': self.formation_delta_mode,
             'high_level_interval': self.high_level_interval,
-            'enforce_disk_boundary': self.enforce_disk_boundary,
         }
 
 

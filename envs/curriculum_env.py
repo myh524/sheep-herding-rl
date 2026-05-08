@@ -30,7 +30,8 @@ class CurriculumStage:
     Curriculum learning stage definition
     
     Defines difficulty parameters for each stage:
-    - num_sheep: Number of sheep
+    - num_sheep: 羊只数；若设置了 num_sheep_range，本字段仍建议填为区间上界（与构造 SheepScenario 上界一致）
+    - num_sheep_range: 可选 (low, high) 闭区间；每 episode reset 时均匀随机整数羊数
     - num_herders: Number of herders
     - world_size: World size
     - episode_length: Maximum episode length
@@ -47,6 +48,7 @@ class CurriculumStage:
         episode_length: int,
         target_success_rate: float,
         min_episodes: int,
+        num_sheep_range: Optional[Tuple[int, int]] = None,
     ):
         self.name = name
         self.num_sheep = num_sheep
@@ -55,6 +57,28 @@ class CurriculumStage:
         self.episode_length = episode_length
         self.target_success_rate = target_success_rate
         self.min_episodes = min_episodes
+        if num_sheep_range is not None:
+            lo, hi = int(num_sheep_range[0]), int(num_sheep_range[1])
+            if lo < 1 or hi < lo:
+                raise ValueError(
+                    f"num_sheep_range 非法: {num_sheep_range}（需 1≤low≤high）"
+                )
+            self.num_sheep_range: Optional[Tuple[int, int]] = (lo, hi)
+        else:
+            self.num_sheep_range = None
+
+    def env_init_num_sheep(self) -> int:
+        """构造 / 升阶后首次 SheepScenario 用的羊数（有 range 时用上界，避免观测维度假设变化）。"""
+        if self.num_sheep_range is not None:
+            return int(self.num_sheep_range[1])
+        return int(self.num_sheep)
+
+    def sample_num_sheep(self, rng: np.random.RandomState) -> int:
+        """本局 episode 使用的羊数。"""
+        if self.num_sheep_range is None:
+            return int(self.num_sheep)
+        lo, hi = self.num_sheep_range
+        return int(rng.randint(lo, hi + 1))
 
 
 class CurriculumSheepFlockEnv(SheepFlockEnv):
@@ -122,12 +146,16 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         
         self.episode_history: List[bool] = []
         self.total_episodes = 0
-        
+        self._rng_curriculum = np.random.RandomState(
+            random_seed if random_seed is not None else 0
+        )
+
         current_stage = self.stages[self.current_stage_idx]
-        
+        init_n_sheep = current_stage.env_init_num_sheep()
+
         super().__init__(
             world_size=current_stage.world_size,
-            num_sheep=current_stage.num_sheep,
+            num_sheep=init_n_sheep,
             num_herders=current_stage.num_herders,
             episode_length=current_stage.episode_length,
             dt=dt,
@@ -154,6 +182,22 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             low_level_deterministic=low_level_deterministic,
         )
 
+    def _rebuild_scenario_curriculum(self, num_sheep: int) -> None:
+        """按当前 world / herders 与给定羊数重建 SheepScenario（与 RandomizedSheepFlockEnv 一致用默认羊参）。"""
+        self.num_sheep = int(num_sheep)
+        self.scenario = type(self.scenario)(
+            world_size=tuple(self.world_size),
+            num_sheep=self.num_sheep,
+            num_herders=self.num_herders,
+            random_seed=None,
+            use_herder_kinematics=self.scenario.use_herder_kinematics,
+            herder_motion=dict(self.herder_motion),
+            enforce_disk_boundary=self.enforce_disk_boundary,
+        )
+        self.action_decoder = HighLevelAction()
+        self._setup_spaces()
+        self._low_bridge = None
+
     def _get_current_stage(self) -> CurriculumStage:
         """Get current stage"""
         return self.stages[self.current_stage_idx]
@@ -165,6 +209,11 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         if self._seed is not None:
             np.random.seed(self._seed)
             self._seed = None
+
+        stage = self._get_current_stage()
+        n_sheep = stage.sample_num_sheep(self._rng_curriculum)
+        if n_sheep != self.num_sheep:
+            self._rebuild_scenario_curriculum(n_sheep)
         
         target_pos = sample_random_target_position(self.world_size)
         
@@ -230,29 +279,23 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
         new_stage = self._get_current_stage()
         
         self.world_size = new_stage.world_size
-        self.num_sheep = new_stage.num_sheep
         self.num_herders = new_stage.num_herders
         self.episode_length = new_stage.episode_length
-        
-        self.scenario = type(self.scenario)(
-            world_size=new_stage.world_size,
-            num_sheep=new_stage.num_sheep,
-            num_herders=new_stage.num_herders,
-            use_herder_kinematics=self.scenario.use_herder_kinematics,
-            herder_motion=dict(self.herder_motion),
-            enforce_disk_boundary=self.enforce_disk_boundary,
-        )
-        
-        self.action_decoder = HighLevelAction()
-        
-        self._setup_spaces()
+
+        init_n = new_stage.env_init_num_sheep()
+        self._rebuild_scenario_curriculum(init_n)
+
         self._reset_formation_integrator()
 
         self.episode_history = []
-        self._low_bridge = None
 
+        sheep_desc = (
+            f"sheep random [{new_stage.num_sheep_range[0]}, {new_stage.num_sheep_range[1]}]"
+            if new_stage.num_sheep_range is not None
+            else f"sheep={new_stage.num_sheep}"
+        )
         print(f"Advanced to {new_stage.name}: "
-              f"sheep={new_stage.num_sheep}, "
+              f"{sheep_desc}, "
               f"herders={new_stage.num_herders}, "
               f"world={new_stage.world_size}, "
               f"episode_length={new_stage.episode_length}")
@@ -271,22 +314,12 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             new_stage = self._get_current_stage()
             
             self.world_size = new_stage.world_size
-            self.num_sheep = new_stage.num_sheep
             self.num_herders = new_stage.num_herders
             self.episode_length = new_stage.episode_length
-            
-            self.scenario = type(self.scenario)(
-                world_size=new_stage.world_size,
-                num_sheep=new_stage.num_sheep,
-                num_herders=new_stage.num_herders,
-                use_herder_kinematics=self.scenario.use_herder_kinematics,
-                herder_motion=dict(self.herder_motion),
-                enforce_disk_boundary=self.enforce_disk_boundary,
-            )
-            
-            self.action_decoder = HighLevelAction()
-            
-            self._setup_spaces()
+
+            init_n = new_stage.env_init_num_sheep()
+            self._rebuild_scenario_curriculum(init_n)
+
             self._reset_formation_integrator()
             self.episode_history = []
             self._low_bridge = None
@@ -298,7 +331,8 @@ class CurriculumSheepFlockEnv(SheepFlockEnv):
             'current_stage': self.current_stage_idx,
             'stage_name': stage.name,
             'num_stages': len(self.stages),
-            'num_sheep': stage.num_sheep,
+            'num_sheep': self.num_sheep,
+            'num_sheep_range': stage.num_sheep_range,
             'num_herders': stage.num_herders,
             'world_size': stage.world_size,
             'episode_length': stage.episode_length,

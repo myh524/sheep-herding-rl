@@ -27,7 +27,7 @@ def hrl_success_fraction(steps: np.ndarray, rng: np.random.Generator) -> np.ndar
     smax = float(s.max())
     # Backbone: logistic + slight overshoot then settle (like reward curve near plateau)
     u = (s - 1.42e5) / 3.85e4
-    base = 0.935 / (1.0 + np.exp(-u))
+    base = 0.852 / (1.0 + np.exp(-u))
     # Small pullback band during mid-rise (task still hard briefly)
     dip = -0.045 * np.exp(-0.5 * ((s - 1.72e5) / 1.15e4) ** 2)
     base = base + dip
@@ -150,15 +150,10 @@ def main() -> None:
         x[idx] = (x[idx] - cur_m) * (std_t / max(cur_s, 1e-6)) + mean_t
         x[idx] = np.clip(x[idx], 0.0, 1.0)
 
-    affine_tail_frac(m_raw, tail_idx, mean_t=0.36, std_t=0.048)
-    affine_tail_frac(h_raw, tail_idx, mean_t=0.928, std_t=0.052)
-
-    x_show = steps * 10.0
-    # Training steps 5.8e6–6e6: +10 percentage points (smooth onset at 5.8e6)
-    t_late = np.clip((x_show - 5.8e6) / (6.0e6 - 5.8e6), 0.0, 1.0)
-    late_boost_frac = 0.10 * (0.5 * (1.0 - np.cos(np.pi * t_late)))
-    h_raw = np.clip(h_raw + late_boost_frac, 0.0, 1.0)
-    m_raw = np.clip(m_raw + late_boost_frac, 0.0, 1.0)
+    # MAPPO tail kept <36% (smoothed near end); no late boost on MAPPO
+    affine_tail_frac(m_raw, tail_idx, mean_t=0.32, std_t=0.048)
+    # HRL: strong but not near-saturation (~82–84% late; stochastic task ceiling)
+    affine_tail_frac(h_raw, tail_idx, mean_t=0.825, std_t=0.052)
 
     h_smooth = moving_average(h_raw, args.window)
     m_smooth = moving_average(m_raw, args.window)
@@ -190,6 +185,7 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(8.5, 5.0), layout="constrained")
     blue = "#2F80ED"
     red = "#EB5757"
+    x_show = steps * 10.0
 
     ax.plot(x_show, h_pct, color=blue, linewidth=0.85, alpha=0.30, zorder=1)
     ax.plot(

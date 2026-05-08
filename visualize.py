@@ -170,6 +170,20 @@ class VisualizationState:
             self.action_history = []
 
 
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _rewrite_root_figures_typo_path(path: Optional[str]) -> Optional[str]:
+    """把误写的根路径 /figures/... 改为仓库内 figures/...，避免在磁盘根目录建文件夹失败。"""
+    if not path:
+        return None
+    raw = str(path).strip()
+    if raw == "/figures" or raw.startswith("/figures/"):
+        rel = raw[1:].lstrip(os.sep)
+        return os.path.normpath(os.path.join(_REPO_ROOT, rel))
+    return raw
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='可视化运行训练好的PPO模型')
     
@@ -327,7 +341,7 @@ def parse_args():
         type=str,
         default=None,
         metavar='DIR',
-        help='若指定目录，则每个 episode 结束后在该目录保存一张「全部羊轨迹」PNG（自动创建目录）',
+        help='若指定目录，则每个 episode 结束后在该目录保存一张「全部羊轨迹」PNG（自动创建目录）。若以 /figures/ 开头会按仓库内 figures/ 解析',
     )
     parser.add_argument(
         '--save-visual-every',
@@ -544,18 +558,11 @@ class Visualizer:
         nh = int(self.env.num_herders)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         sub = f"sheep{ns}_herder{nh}_{stamp}"
-        repo_root = os.path.dirname(os.path.abspath(__file__))
         root = getattr(self.args, "save_visual_dir", None)
         if not root:
-            parent = os.path.join(repo_root, "figures", "viz_snapshots")
+            parent = os.path.join(_REPO_ROOT, "figures", "viz_snapshots")
         else:
-            raw = str(root).strip()
-            # 误写 /figures/... 会被当成根目录 /figures（常无写权限），改为仓库内 figures/...
-            if raw == "/figures" or raw.startswith("/figures/"):
-                rel = raw[1:].lstrip(os.sep)
-                parent = os.path.normpath(os.path.join(repo_root, rel))
-            else:
-                parent = os.path.abspath(raw)
+            parent = os.path.abspath(str(root).strip())
         self._visual_snapshot_dir = os.path.join(parent, sub)
         os.makedirs(self._visual_snapshot_dir, exist_ok=True)
         print(
@@ -747,17 +754,18 @@ class Visualizer:
             if herder_targets is not None:
                 for i in range(self.env.num_herders):
                     target_pos_i = np.asarray(herder_targets[i], dtype=float).reshape(2)
-                    self.ax.add_patch(
-                        patches.Circle(
-                            (float(target_pos_i[0]), float(target_pos_i[1])),
-                            FORMATION_SAMPLE_CIRCLE_RADIUS,
-                            facecolor="gold",
-                            edgecolor="darkorange",
-                            linewidth=1.0,
-                            alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
-                            zorder=FORMATION_SAMPLE_CIRCLE_ZORDER,
-                        )
-                    )
+                    # 暂时关闭：编队采样点金色圆（Sampled target）。恢复显示时取消下面整块注释。
+                    # self.ax.add_patch(
+                    #     patches.Circle(
+                    #         (float(target_pos_i[0]), float(target_pos_i[1])),
+                    #         FORMATION_SAMPLE_CIRCLE_RADIUS,
+                    #         facecolor="gold",
+                    #         edgecolor="darkorange",
+                    #         linewidth=1.0,
+                    #         alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
+                    #         zorder=FORMATION_SAMPLE_CIRCLE_ZORDER,
+                    #     )
+                    # )
                     if i < len(herder_positions):
                         hpos = herder_positions[i]
                         direction = target_pos_i - hpos
@@ -818,13 +826,14 @@ class Visualizer:
                       markersize=10, markeredgecolor='black', label='Sheep'),
             plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='blue',
                       markersize=10, markeredgecolor='darkblue', label='Herder'),
-            patches.Patch(
-                facecolor="gold",
-                alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
-                edgecolor="darkorange",
-                linewidth=1.0,
-                label="Sampled target",
-            ),
+            # 与上方金色圆一并关闭图例项；恢复圆时取消注释。
+            # patches.Patch(
+            #     facecolor="gold",
+            #     alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
+            #     edgecolor="darkorange",
+            #     linewidth=1.0,
+            #     label="Sampled target",
+            # ),
             patches.Patch(facecolor='blue', alpha=0.08, edgecolor='blue',
                          linestyle='--', label='Evasion Zone'),
         ]
@@ -992,6 +1001,32 @@ class Visualizer:
             label="Flock centroid (smoothed)",
             zorder=5,
         )
+        # 沿质心轨迹箭头表示运动方向（随长度自适应数量）
+        Tc = int(centroid_s.shape[0])
+        if Tc >= 2:
+            n_seg = min(14, max(4, Tc // 12))
+            step = max(1, (Tc - 1) // n_seg)
+            for i in range(0, Tc - 1, step):
+                j = min(i + step, Tc - 1)
+                if j <= i:
+                    j = min(i + 1, Tc - 1)
+                x1, y1 = float(centroid_s[i, 0]), float(centroid_s[i, 1])
+                x2, y2 = float(centroid_s[j, 0]), float(centroid_s[j, 1])
+                ax_traj.annotate(
+                    "",
+                    xy=(x2, y2),
+                    xytext=(x1, y1),
+                    arrowprops=dict(
+                        arrowstyle="->",
+                        color="crimson",
+                        lw=2.2,
+                        alpha=0.85,
+                        shrinkA=0,
+                        shrinkB=0,
+                        mutation_scale=24,
+                    ),
+                    zorder=5,
+                )
         ax_traj.scatter(
             centroid_s[0, 0],
             centroid_s[0, 1],
@@ -1139,6 +1174,12 @@ class Visualizer:
 
 def main():
     args = parse_args()
+    args.save_sheep_trajectory_dir = _rewrite_root_figures_typo_path(
+        getattr(args, "save_sheep_trajectory_dir", None)
+    )
+    args.save_visual_dir = _rewrite_root_figures_typo_path(
+        getattr(args, "save_visual_dir", None)
+    )
 
     print(f"Model: {args.model_path}")
     print(f"Config: {args.num_sheep} sheep, {args.num_herders} herders, world {args.world_size}")

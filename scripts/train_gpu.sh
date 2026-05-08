@@ -10,7 +10,7 @@
 #   - Reward normalization
 #   - Improved hyperparameters
 # ============================================================================
-# Curriculum 阶段在代码里定义：envs/curriculum_env.py → CurriculumSheepFlockEnv.DEFAULT_STAGES
+# Curriculum 阶段在代码里定义：envs/defaults.py → DEFAULT_CURRICULUM_STAGE_SPECS
 # （默认）各阶段 world 100×100、ep_len 150；dt 与 SheepFlockEnv 默认一致（2.0）
 #   --herder_teleport: 狗直接到编队目标，无运动学（先看队形；低层运动后续再训）
 # ============================================================================

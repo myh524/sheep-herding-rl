@@ -244,15 +244,17 @@ class SheepEntity:
             - evasion: 逃避权重
             - boundary: 边界权重
         """
-        w = weights or {}
+        
         neighbors = self.get_neighbors(all_sheep)
-
-        sep_force = self.separation(neighbors) * w.get('separation', 1.0)
-        ali_force = self.alignment(neighbors) * w.get('alignment', 1.0)
-        coh_force = self.cohesion(neighbors) * w.get('cohesion', 1.0)
-        eva_force = self.evasion(herders) * w.get('evasion', 1.0)
+        
+        sep_force = self.separation(neighbors) * weights.get('separation', 1.0)
+        ali_force = self.alignment(neighbors) * weights.get('alignment', 1.0)
+        coh_force = self.cohesion(neighbors) * weights.get('cohesion', 1.0)
+        eva_force = self.evasion(herders) * weights.get('evasion', 1.0)
         if apply_boundary:
-            bnd_force = self.boundary_force(world_radius) * w.get('boundary', 1.0)
+            bnd_force = self.boundary_force(world_radius) * weights.get(
+                'boundary', 1.0
+            )
         else:
             bnd_force = np.zeros(2, dtype=np.float32)
 

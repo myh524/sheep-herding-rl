@@ -84,7 +84,8 @@ def randomized_sheep_config(max_speed: float) -> Dict[str, float]:
 
 # ---------------------------------------------------------------------------
 # 课程学习：供 CurriculumStage(**spec) 使用的纯 dict 列表
-# 字段含义与 CurriculumStage 构造函数一致
+# 字段含义与 CurriculumStage 构造函数一致。
+# 可选 num_sheep_range: (low, high) 闭区间，每 episode reset 均匀随机羊数（需 num_sheep≥high，作上界占位）。
 # ---------------------------------------------------------------------------
 
 DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
@@ -116,7 +117,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "min_episodes": 200,
     },
     {
-        "name": "Stage 3: Target",
+        "name": "Stage 3: Target1",
         "num_sheep": 15,
         "num_herders": 4,
         "world_size": (120.0, 120.0),
@@ -125,7 +126,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "min_episodes": 200,
     },
     {
-        "name": "Stage 4: Target",
+        "name": "Stage 4: Target2",
         "num_sheep": 20,
         "num_herders": 4,
         "world_size": (120.0, 120.0),
@@ -134,7 +135,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "min_episodes": 200,
     },
     {
-        "name": "Stage 5: Target",
+        "name": "Stage 5: Target3",
         "num_sheep": 25,
         "num_herders": 5,
         "world_size": (140.0, 140.0),
@@ -143,11 +144,21 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "min_episodes": 200,
     },
     {
-        "name": "Stage 6: Target",
+        "name": "Stage 6: Target4",
         "num_sheep": 30,
         "num_herders": 5,
         "world_size": (140.0, 140.0),
-        "episode_length": 350,
+        "episode_length": 300,
+        "target_success_rate": 0.8,
+        "min_episodes": 200,
+    },
+    {
+        "name": "Stage 7: Target5",
+        "num_sheep": 30,
+        "num_sheep_range": (5, 30),
+        "num_herders": 5,
+        "world_size": (140.0, 140.0),
+        "episode_length": 300,
         "target_success_rate": 0.8,
         "min_episodes": 200,
     },

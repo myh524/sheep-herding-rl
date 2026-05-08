@@ -39,15 +39,16 @@ python visualize.py \
     --model_path "$MODEL_PATH" \
     --num_episodes 4 \
     --num_sheep 10 \
-    --num_herders 5 \
+    --num_herders 4 \
     --world_size 100 100 \
     --episode_length 200 \
     --render_delay 100 \
     --formation_delta \
     --high_level_interval 3 \
     --no-disk-boundary \
-    --save-visual-every 20 \
-    --save-visual-dir /figures/my_viz_snapshots \
+    --save-sheep-trajectory-dir /figures/sheep_trajectories \
+    # --save-visual-every 20 \
+    # --save-visual-dir /figures/my_viz_snapshots \
     # --herder_teleport \
     # --save-sheep-trajectory-dir /figures/sheep_trajectories \
     # --low-level-model-dir InforMARL/onpolicy/results/GraphMPE/navigation_graph/rmappo/informarl/run5/models \
