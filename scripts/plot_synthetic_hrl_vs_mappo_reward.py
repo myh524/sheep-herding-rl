@@ -216,7 +216,7 @@ def main() -> None:
 
     # Display-only: pretend axis runs to 6e6 so the sci-notation offset reads ×10^6
     # (synthetic data still generated on 0..6e5; curve shape unchanged)
-    x_show = steps * 10.0
+    x_show = steps * 1.0
 
     # ===== 分层 HRL =====
     ax.plot(
@@ -260,12 +260,12 @@ def main() -> None:
         solid_capstyle='round'
     )
     ax.set_xlabel("Training Steps", fontsize=14)
-    ax.set_ylabel("Average Episode Return", fontsize=14)
-    ax.set_xlim(0.0, 6.0e6)
+    ax.set_ylabel("Average Episode Reward", fontsize=14)
+    ax.set_xlim(0.0, 6.0e5)
     ax.set_ylim(-200.0, 345.0)
 
     ax.tick_params(axis="both", which="major", labelsize=12)
-    ax.ticklabel_format(style="sci", axis="x", useMathText=True)
+    ax.ticklabel_format(style="sci", axis="x", useMathText=True, scilimits=(5, 5))
     ax.legend(loc="upper left", framealpha=0.95, fontsize=11)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

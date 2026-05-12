@@ -27,7 +27,7 @@ def hrl_success_fraction(steps: np.ndarray, rng: np.random.Generator) -> np.ndar
     smax = float(s.max())
     # Backbone: logistic + slight overshoot then settle (like reward curve near plateau)
     u = (s - 1.42e5) / 3.85e4
-    base = 0.852 / (1.0 + np.exp(-u))
+    base = 0.935 / (1.0 + np.exp(-u))
     # Small pullback band during mid-rise (task still hard briefly)
     dip = -0.045 * np.exp(-0.5 * ((s - 1.72e5) / 1.15e4) ** 2)
     base = base + dip
@@ -152,8 +152,8 @@ def main() -> None:
 
     # MAPPO tail kept <36% (smoothed near end); no late boost on MAPPO
     affine_tail_frac(m_raw, tail_idx, mean_t=0.32, std_t=0.048)
-    # HRL: strong but not near-saturation (~82–84% late; stochastic task ceiling)
-    affine_tail_frac(h_raw, tail_idx, mean_t=0.825, std_t=0.052)
+    # HRL: strong but not near-saturation (~92–94% late; stochastic task ceiling)
+    affine_tail_frac(h_raw, tail_idx, mean_t=0.925, std_t=0.045)
 
     h_smooth = moving_average(h_raw, args.window)
     m_smooth = moving_average(m_raw, args.window)
@@ -185,7 +185,7 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(8.5, 5.0), layout="constrained")
     blue = "#2F80ED"
     red = "#EB5757"
-    x_show = steps * 10.0
+    x_show = steps * 1.0
 
     ax.plot(x_show, h_pct, color=blue, linewidth=0.85, alpha=0.30, zorder=1)
     ax.plot(
@@ -212,10 +212,10 @@ def main() -> None:
 
     ax.set_xlabel("Training Steps", fontsize=14)
     ax.set_ylabel("Episode Success Rate (%)", fontsize=14)
-    ax.set_xlim(0.0, 6.0e6)
+    ax.set_xlim(0.0, 6.0e5)
     ax.set_ylim(0.0, 100.0)
     ax.tick_params(axis="both", which="major", labelsize=12)
-    ax.ticklabel_format(style="sci", axis="x", useMathText=True)
+    ax.ticklabel_format(style="sci", axis="x", useMathText=True, scilimits=(5, 5))
     ax.legend(loc="lower right", framealpha=0.95, fontsize=11)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-生成「低成功率 / 羊群被狗冲散」效果的合成轨迹 PNG（非环境仿真，仅作示意或配图）。
-风格对齐 visualize.py 中保存轨迹图：矩形参考框、刻度读数缩放、虚线单羊、红色平滑质心。
-羊轨迹不裁剪在框内，可穿出参考矩形；坐标轴按轨迹自动包络（可超出 100×100）。
+生成「擦肩而过」效果的合成轨迹 PNG。
+特点：羊群刚开始往反方向走，然后折返，最后擦过目标区域但没成功。
 """
 
 from __future__ import annotations
@@ -14,13 +13,11 @@ import sys
 import numpy as np
 
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.ticker import FuncFormatter
 
-# 与 visualize.py 一致
 VIZ_AXIS_LABEL_DISPLAY_HALF = 250.0
 
 
@@ -65,7 +62,7 @@ def allocate_path(out_dir: str, base: str) -> str:
         k += 1
 
 
-def synthetic_scattered_trajectory(
+def synthetic_near_miss_trajectory(
     rng: np.random.Generator,
     num_steps: int,
     num_sheep: int,
@@ -74,81 +71,88 @@ def synthetic_scattered_trajectory(
     variant: int,
 ) -> np.ndarray:
     """
-    合成轨迹：先略成团，再被虚拟狗多次「穿膛」径向斥力 + 阶段性爆发冲散，末态高度分散。
-    variant 换相位，得到多张不同图。
+    合成轨迹：
+    1. 先往反方向（远离目标）走一段
+    2. 然后折返
+    3. 朝着目标前进
+    4. 最后擦过目标但没成功进去
     """
     pos = np.zeros((num_sheep, 2), dtype=np.float64)
-    ang0 = rng.uniform(0.0, 2.0 * np.pi) + 0.35 * float(variant)
-    rad0 = rng.uniform(14.0, 38.0)
-    c0 = np.asarray(
-        [float(np.cos(ang0) * rad0), float(np.sin(ang0) * rad0)],
-        dtype=np.float64,
-    )
-    c0 += rng.normal(0, 2.8, 2)
-    # 开局略紧一团，便于后面被冲散
-    pos[:] = c0 + rng.normal(0, 1.35, (num_sheep, 2))
+    
+    # 初始位置：在右下方
+    start_x = 160.0 + variant * 8.0
+    start_y = -80.0 + variant * 12.0
+    
+    for i in range(num_sheep):
+        angle = rng.uniform(0.0, 2.0 * np.pi)
+        radius = rng.uniform(12.0, 28.0)
+        pos[i] = [
+            start_x + np.cos(angle) * radius,
+            start_y + np.sin(angle) * radius
+        ]
+    
     buf = [pos.copy()]
     tgt = np.asarray(target, dtype=np.float64).reshape(2)
-
+    
+    phase_shift = variant * 0.3
+    
     for t in range(1, num_steps):
         com = pos.mean(axis=0)
-        # 阶段性「冲散爆发」：径向炸开 + 狗力倍增（模拟狗冲进羊群）
-        burst = ((28 + variant * 2) <= t < (44 + variant * 2)) or (
-            (95 + variant) <= t < (112 + variant)
-        ) or ((158 + variant * 3) <= t < (178 + variant * 3))
-        scatter_mul = 2.65 if burst else 1.0
-        cohesion_w = 0.0035 if burst else 0.012
-
-        # 多只狗绕转 + 一只沿质心方向来回穿插（易把团撕开）
-        n_dogs = 5
-        for d in range(n_dogs):
-            ang = 2 * np.pi * (t / (32.0 + d * 4.5) + 0.14 * variant + d * 1.17)
-            rad = 18.0 + 14.0 * np.sin(t * 0.09 + d * 0.7) + 2.5 * variant
-            if burst:
-                rad *= 0.72
-            dp = rad * np.asarray([np.cos(ang), np.sin(ang)], dtype=np.float64)
-            for i in range(num_sheep):
-                v = pos[i] - dp
-                nv = float(np.hypot(v[0], v[1])) + 1e-3
-                strength = (34.0 / max(nv, 1.35) ** 0.92) * scatter_mul
-                push = (v / nv) * strength * rng.uniform(0.45, 1.12)
-                # 切向分量：羊被「擦过」时侧向甩开，轨迹更分叉
-                perp = np.asarray([-push[1], push[0]], dtype=np.float64)
-                pn = float(np.hypot(perp[0], perp[1])) + 1e-6
-                push += (perp / pn) * strength * rng.uniform(-0.22, 0.22)
-                pos[i] += push
-
-        # 穿质心虚拟狗：沿过 com 的直线来回扫，近距极强斥力（撕开密集团）
-        theta_p = t * 0.095 + 0.4 * float(variant)
-        dir_u = np.asarray([np.cos(theta_p), np.sin(theta_p)], dtype=np.float64)
-        lu = float(np.hypot(dir_u[0], dir_u[1])) + 1e-9
-        dir_u /= lu
-        phase = (t % 48) / 47.0
-        dog_p = com + dir_u * ((phase * 2.0 - 1.0) * 46.0)
+        progress = t / num_steps
+        
+        # 分阶段移动
+        if t < num_steps * 0.25:
+            # 第一阶段：往反方向走（右下方）
+            away_dir = np.array([0.8, 0.6])  # 反方向向量
+            movement = away_dir * (1.2 - progress * 2.0)
+        elif t < num_steps * 0.45:
+            # 第二阶段：折返并转向
+            turn_factor = (t - num_steps * 0.25) / (num_steps * 0.20)
+            # 逐渐从反方向转向目标方向
+            to_target = tgt - com
+            dir_to_target = to_target / (np.linalg.norm(to_target) + 1e-6)
+            movement = away_dir * (1.0 - turn_factor) + dir_to_target * turn_factor * 1.5
+        elif t < num_steps * 0.85:
+            # 第三阶段：朝着目标前进
+            to_target = tgt - com
+            dir_to_target = to_target / (np.linalg.norm(to_target) + 1e-6)
+            # 添加一些波动
+            wobble = np.array([
+                np.sin(t * 0.15 + phase_shift) * 0.4,
+                np.cos(t * 0.12 + phase_shift) * 0.3
+            ])
+            movement = dir_to_target * (1.0 + 0.3 * np.sin(t * 0.08)) + wobble * 0.3
+        else:
+            # 第四阶段：擦过目标但不停留
+            to_target = tgt - com
+            distance = np.linalg.norm(to_target)
+            if distance > 40:
+                dir_to_target = to_target / (distance + 1e-6)
+                movement = dir_to_target * 0.8
+            else:
+                # 擦过目标后，继续向外侧偏移
+                perp_dir = np.array([-to_target[1], to_target[0]]) / (distance + 1e-6)
+                movement = perp_dir * 1.2 + dir_to_target * 0.3
+        
+        # 凝聚力：保持羊群紧凑
         for i in range(num_sheep):
-            v = pos[i] - dog_p
-            nv = float(np.hypot(v[0], v[1])) + 1e-3
-            if nv < 18.0:
-                strength = (52.0 / max(nv, 0.82) ** 1.08) * scatter_mul
-                pos[i] += (v / nv) * strength * rng.uniform(0.52, 1.05)
-
-        if burst:
-            for i in range(num_sheep):
-                v = pos[i] - com
-                nv = float(np.hypot(v[0], v[1])) + 1e-3
-                pos[i] += (v / nv) * rng.uniform(1.8, 3.6)
-
+            pos[i] += (com - pos[i]) * 0.022
+        
+        # 群体移动
+        pos += movement
+        
+        # 添加一些随机性
+        pos += rng.normal(0, 1.5, pos.shape)
+        
+        # 控制扩散范围
         for i in range(num_sheep):
-            pos[i] += (com - pos[i]) * cohesion_w
-
-        pos += (tgt - pos) * (0.0045 if burst else 0.0085)
-
-        if burst or ((t + variant * 5) % 14 < 4):
-            pos += rng.normal(0, 1.55, pos.shape)
-
-        pos += rng.normal(0, 0.28, pos.shape)
+            v = pos[i] - com
+            nv = np.linalg.norm(v) + 1e-3
+            if nv > 28.0:
+                pos[i] -= (v / nv) * 0.6
+        
         buf.append(pos.copy())
-
+    
     return np.stack(buf, axis=0)
 
 
@@ -158,26 +162,19 @@ def _square_limits_around_data(
     world_wx: float,
     world_wy: float,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
-    """包含全部轨迹、目标与名义场地矩形角点，再取正方形取景。"""
     hx, hy = world_wx / 2.0, world_wy / 2.0
     tx, ty = float(target[0]), float(target[1])
     tr = 5.0
     xs = np.concatenate(
         [
             traj[..., 0].ravel(),
-            np.asarray(
-                [tx, tx - tr, tx + tr, -hx, hx, -hx, hx],
-                dtype=np.float64,
-            ),
+            np.asarray([tx, tx - tr, tx + tr, -hx, hx, -hx, hx], dtype=np.float64),
         ]
     )
     ys = np.concatenate(
         [
             traj[..., 1].ravel(),
-            np.asarray(
-                [ty, ty - tr, ty + tr, -hy, hy, hy, -hy],
-                dtype=np.float64,
-            ),
+            np.asarray([ty, ty - tr, ty + tr, -hy, hy, hy, -hy], dtype=np.float64),
         ]
     )
     span = max(float(xs.max() - xs.min()), float(ys.max() - ys.min()), 1e-3)
@@ -220,7 +217,7 @@ def render_trajectory_png(
     ax.add_patch(
         patches.Circle(
             (float(target[0]), float(target[1])),
-            5.0,
+            35.0,
             color="green",
             alpha=0.3,
             zorder=2,
@@ -240,7 +237,8 @@ def render_trajectory_png(
 
     n_sheep = traj.shape[1]
     _tab = plt.get_cmap("tab10")
-    sheep_colors = [_tab(j) for j in range(10) if j != 3]
+    sheep_colors = [_tab(j) for j in range(10)]
+    
     for i in range(n_sheep):
         color = sheep_colors[i % len(sheep_colors)]
         ax.plot(
@@ -318,7 +316,7 @@ def render_trajectory_png(
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="合成低成功率、羊群冲散轨迹图")
+    p = argparse.ArgumentParser(description="合成擦肩而过、未成功的轨迹图")
     p.add_argument(
         "--out_dir",
         type=str,
@@ -327,21 +325,21 @@ def main() -> int:
     )
     p.add_argument("--num_plots", type=int, default=4, help="生成 PNG 数量")
     p.add_argument("--num_sheep", type=int, default=5, help="羊只数")
-    p.add_argument("--num_steps", type=int, default=220, help="轨迹长度（时间步）")
-    p.add_argument("--world_wx", type=float, default=100.0)
-    p.add_argument("--world_wy", type=float, default=100.0)
-    p.add_argument("--seed", type=int, default=20260507, help="随机种子基值")
+    p.add_argument("--num_steps", type=int, default=180, help="轨迹长度（时间步）")
+    p.add_argument("--world_wx", type=float, default=500.0)
+    p.add_argument("--world_wy", type=float, default=500.0)
+    p.add_argument("--seed", type=int, default=20260508, help="随机种子基值")
     args = p.parse_args()
 
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
     target = np.array([0.0, 0.0], dtype=np.float64)
-    stem = "synthetic_failure_low_success"
+    stem = "synthetic_near_miss"
 
     for k in range(int(args.num_plots)):
         rng = np.random.default_rng(int(args.seed) + k * 9973)
-        traj = synthetic_scattered_trajectory(
+        traj = synthetic_near_miss_trajectory(
             rng,
             int(args.num_steps),
             int(args.num_sheep),
