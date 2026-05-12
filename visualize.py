@@ -203,6 +203,14 @@ def parse_args():
     parser.add_argument('--episode_length', type=int, default=DEFAULT_VIS_EPISODE_LENGTH)
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument(
+        '--initial-flock-centroid',
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=('CX', 'CY'),
+        help='羊群初始质心 (世界坐标米)；指定后每 episode reset 均在该点附近成团撒羊，不指定则随机',
+    )
+    parser.add_argument(
         '--herder_teleport',
         action='store_true',
         default=False,
@@ -755,17 +763,17 @@ class Visualizer:
                 for i in range(self.env.num_herders):
                     target_pos_i = np.asarray(herder_targets[i], dtype=float).reshape(2)
                     # 暂时关闭：编队采样点金色圆（Sampled target）。恢复显示时取消下面整块注释。
-                    # self.ax.add_patch(
-                    #     patches.Circle(
-                    #         (float(target_pos_i[0]), float(target_pos_i[1])),
-                    #         FORMATION_SAMPLE_CIRCLE_RADIUS,
-                    #         facecolor="gold",
-                    #         edgecolor="darkorange",
-                    #         linewidth=1.0,
-                    #         alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
-                    #         zorder=FORMATION_SAMPLE_CIRCLE_ZORDER,
-                    #     )
-                    # )
+                    self.ax.add_patch(
+                        patches.Circle(
+                            (float(target_pos_i[0]), float(target_pos_i[1])),
+                            FORMATION_SAMPLE_CIRCLE_RADIUS,
+                            facecolor="gold",
+                            edgecolor="darkorange",
+                            linewidth=1.0,
+                            alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
+                            zorder=FORMATION_SAMPLE_CIRCLE_ZORDER,
+                        )
+                    )
                     if i < len(herder_positions):
                         hpos = herder_positions[i]
                         direction = target_pos_i - hpos
@@ -827,13 +835,13 @@ class Visualizer:
             plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='blue',
                       markersize=10, markeredgecolor='darkblue', label='Herder'),
             # 与上方金色圆一并关闭图例项；恢复圆时取消注释。
-            # patches.Patch(
-            #     facecolor="gold",
-            #     alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
-            #     edgecolor="darkorange",
-            #     linewidth=1.0,
-            #     label="Sampled target",
-            # ),
+            patches.Patch(
+                facecolor="gold",
+                alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
+                edgecolor="darkorange",
+                linewidth=1.0,
+                label="Sampled target",
+            ),
             patches.Patch(facecolor='blue', alpha=0.08, edgecolor='blue',
                          linestyle='--', label='Evasion Zone'),
         ]
@@ -1050,7 +1058,7 @@ class Visualizer:
 
         ax_traj.grid(True, alpha=0.3)
         self._apply_axis_display_tick_labels(ax_traj)
-        ax_traj.legend(loc="upper right", fontsize=8, ncol=2)
+        ax_traj.legend(loc="upper left", fontsize=8, ncol=2)
         fig_traj.tight_layout()
         fig_traj.savefig(path, dpi=150)
         plt.close(fig_traj)
@@ -1228,6 +1236,14 @@ def main():
         hm["herder_slot_assignment"] = str(args.herder_assignment)
     if hm:
         extra_kw["herder_motion"] = hm
+    ic = getattr(args, "initial_flock_centroid", None)
+    if ic is not None:
+        extra_kw["initial_flock_centroid"] = (float(ic[0]), float(ic[1]))
+        print(
+            f"初始羊群质心: ({extra_kw['initial_flock_centroid'][0]:.3g}, "
+            f"{extra_kw['initial_flock_centroid'][1]:.3g})",
+            flush=True,
+        )
     extra_kw.update(_low_level_sheep_env_kwargs(args))
     env = SheepFlockEnv(
         world_size=tuple(args.world_size),

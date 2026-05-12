@@ -235,6 +235,7 @@ class SheepScenario:
         use_herder_kinematics: bool = True,
         herder_motion: Optional[Dict[str, Any]] = None,
         enforce_disk_boundary: bool = True,
+        initial_flock_centroid: Optional[Tuple[float, float]] = None,
     ):
         """
         Args:
@@ -247,6 +248,7 @@ class SheepScenario:
             use_herder_kinematics: False 时机械狗每步直接置于编队目标点（无运动学），便于调试高层队形
             herder_motion: 覆盖默认机械狗运动/分配参数（见 envs.defaults.default_herder_motion_config）
             enforce_disk_boundary: False 时不把羊/狗位置限制在圆盘内，也不施加圆边界 Boids 力（可任意远离原点）。
+            initial_flock_centroid: 若给定 (cx, cy)，则每轮 _init_sheep 以该点为羊群质心附近成团撒点；None 时随机质心（原行为）。
         """
         if random_seed is not None:
             np.random.seed(random_seed)
@@ -263,7 +265,11 @@ class SheepScenario:
             self._hm.update(copy.deepcopy(herder_motion))
         
         self.sheep_config = sheep_config or default_sheep_config()
-        
+        self._initial_flock_centroid: Optional[np.ndarray] = None
+        if initial_flock_centroid is not None:
+            fc = np.asarray(initial_flock_centroid, dtype=np.float64).reshape(2)
+            self._initial_flock_centroid = fc.astype(np.float32)
+
         self.sheep: List[SheepEntity] = []
         self.herder_positions: np.ndarray = np.zeros((num_herders, 2), dtype=np.float32)
         self.target_position = np.zeros(2, dtype=np.float32)
@@ -299,13 +305,18 @@ class SheepScenario:
                 min(2.5 + 0.55 * np.sqrt(max(n, 1)), 0.12 * max(Wx, Wy))
             )
             cluster_r = max(cluster_r, 1.0)
-            flock_center = np.array(
-                [
-                    float(np.random.uniform(-hx, hx)),
-                    float(np.random.uniform(-hy, hy)),
-                ],
-                dtype=np.float32,
-            )
+            if self._initial_flock_centroid is not None:
+                flock_center = self._initial_flock_centroid.astype(np.float32).copy()
+                flock_center[0] = float(np.clip(flock_center[0], -hx, hx))
+                flock_center[1] = float(np.clip(flock_center[1], -hy, hy))
+            else:
+                flock_center = np.array(
+                    [
+                        float(np.random.uniform(-hx, hx)),
+                        float(np.random.uniform(-hy, hy)),
+                    ],
+                    dtype=np.float32,
+                )
         else:
             R = float(self.world_radius)
             margin = 1.0
@@ -321,16 +332,22 @@ class SheepScenario:
                 min_center_r = max(0.1 * R, max_center_r * 0.3)
                 max_center_r = max(min_center_r + 0.5, lim - cluster_r)
 
-            ca = float(np.random.uniform(0.0, 2.0 * np.pi))
-            cr = float(
-                np.random.uniform(min_center_r, max(max_center_r, min_center_r + 1e-3))
-            )
-            flock_center = np.array(
-                [np.cos(ca) * cr, np.sin(ca) * cr], dtype=np.float32
-            )
-            flock_center = self._clip_pos(
-                flock_center, max(lim - cluster_r, 0.1 * R)
-            )
+            if self._initial_flock_centroid is not None:
+                flock_center = self._initial_flock_centroid.astype(np.float32).copy()
+                flock_center = self._clip_pos(
+                    flock_center, max(lim - cluster_r, 0.1 * R)
+                )
+            else:
+                ca = float(np.random.uniform(0.0, 2.0 * np.pi))
+                cr = float(
+                    np.random.uniform(min_center_r, max(max_center_r, min_center_r + 1e-3))
+                )
+                flock_center = np.array(
+                    [np.cos(ca) * cr, np.sin(ca) * cr], dtype=np.float32
+                )
+                flock_center = self._clip_pos(
+                    flock_center, max(lim - cluster_r, 0.1 * R)
+                )
 
         for _ in range(n):
             ang = float(np.random.uniform(0.0, 2.0 * np.pi))

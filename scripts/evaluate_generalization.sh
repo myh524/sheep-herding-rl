@@ -91,5 +91,7 @@ echo "=========================================="
 python3 evaluate_generalization.py \
     --model_path "$MODEL_PATH" \
     --num_episodes "$NUM_EPISODES" \
+    --no-disk-boundary \
+    --herder_teleport
     "${OUT_ARGS[@]}" \
     "${EXTRA[@]}"

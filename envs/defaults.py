@@ -114,7 +114,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "world_size": (120.0, 120.0),
         "episode_length": 300,
         "target_success_rate": 0.8,
-        "min_episodes": 200,
+        "min_episodes": 100,
     },
     {
         "name": "Stage 3: Target1",
@@ -123,7 +123,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "world_size": (120.0, 120.0),
         "episode_length": 300,
         "target_success_rate": 0.8,
-        "min_episodes": 200,
+        "min_episodes": 100,
     },
     {
         "name": "Stage 4: Target2",
@@ -132,7 +132,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "world_size": (120.0, 120.0),
         "episode_length": 300,
         "target_success_rate": 0.8,
-        "min_episodes": 200,
+        "min_episodes": 100,
     },
     {
         "name": "Stage 5: Target3",
@@ -141,7 +141,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "world_size": (140.0, 140.0),
         "episode_length": 300,
         "target_success_rate": 0.8,
-        "min_episodes": 200,
+        "min_episodes": 100,
     },
     {
         "name": "Stage 6: Target4",
@@ -150,7 +150,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "world_size": (140.0, 140.0),
         "episode_length": 300,
         "target_success_rate": 0.8,
-        "min_episodes": 200,
+        "min_episodes": 100,
     },
     {
         "name": "Stage 7: Target5",
@@ -160,7 +160,7 @@ DEFAULT_CURRICULUM_STAGE_SPECS: List[Dict[str, Any]] = [
         "world_size": (140.0, 140.0),
         "episode_length": 300,
         "target_success_rate": 0.8,
-        "min_episodes": 200,
+        "min_episodes": 100,
     },
 ]
 
@@ -171,7 +171,7 @@ _DEFAULT_REWARD_CONFIG: Dict[str, float] = {
     "near_d0_alpha": 0.15,  # 近场尺度 d0 = alpha * (2*world_radius)
     "w_speed": 0.40,  # 质心速度正则（近目标更强）
     "v_ref_scale": 1.0,  # 速度参考 v_ref = v_ref_scale * sheep max_speed
-    "w_spread": 0.12,  # 羊群轴对齐包络面积（扩散）惩罚权重
+    "w_spread": 0.25,  # 羊群轴对齐包络面积（扩散）惩罚权重
     "envelope_area_ref": 0.12,  # 包络面积归一化参考，用于 tanh 尺度
     "time_penalty": 0.005,  # 每步时间惩罚系数（远离目标时）
     "time_penalty_off_threshold_m": 5.0,  # 质心距目标 < 此米数则时间惩罚为 0

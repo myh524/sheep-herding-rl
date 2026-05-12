@@ -2,8 +2,9 @@
 # 可视化运行脚本
 # 加载训练好的模型并实时渲染环境
 # 默认参数
-MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
-
+# MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_112928/models/model_8402400.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_180810/models/model_5882400.pt}"
 # MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260506_184044/models/model_1202400.pt}"
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
@@ -37,16 +38,20 @@ fi
 
 python visualize.py \
     --model_path "$MODEL_PATH" \
-    --num_episodes 4 \
-    --num_sheep 10 \
-    --num_herders 4 \
+    --num_episodes 1 \
+    --num_sheep 25 \
+    --num_herders 5 \
     --world_size 100 100 \
-    --episode_length 200 \
-    --render_delay 100 \
+    --initial-flock-centroid 28 28 \
+    --episode_length 150 \
+    --render_delay 1 \
     --formation_delta \
-    --high_level_interval 3 \
+    --high_level_interval 1 \
     --no-disk-boundary \
     --save-sheep-trajectory-dir /figures/sheep_trajectories \
+    --herder_teleport \
+    # --herder_teleport \
+    # --save-sheep-trajectory-dir /figures/sheep_trajectories \
     # --save-visual-every 20 \
     # --save-visual-dir /figures/my_viz_snapshots \
     # --herder_teleport \

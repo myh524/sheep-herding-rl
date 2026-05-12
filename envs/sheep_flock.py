@@ -68,6 +68,7 @@ class SheepFlockEnv:
         low_level_max_edge_dist: Optional[float] = None,
         low_level_use_shepherd: bool = True,
         low_level_deterministic: bool = True,
+        initial_flock_centroid: Optional[Tuple[float, float]] = None,
     ):
         """
         初始化环境
@@ -101,6 +102,7 @@ class SheepFlockEnv:
             low_level_max_edge_dist: 低层 GNN 连边半径；None 时用 default_low_level_max_edge_dist(world_size)
             low_level_use_shepherd: 低层是否启用牧羊障碍与奖励语义。
             low_level_deterministic: 低层策略是否确定性动作。
+            initial_flock_centroid: 若 (cx, cy)，每轮 reset 羊群以该质心附近成团初始化；None 为随机（见 SheepScenario._init_sheep）。
         """
         self.enforce_disk_boundary = bool(enforce_disk_boundary)
         self.world_size = world_size
@@ -165,6 +167,7 @@ class SheepFlockEnv:
             use_herder_kinematics=use_herder_kinematics,
             herder_motion=self.herder_motion,
             enforce_disk_boundary=self.enforce_disk_boundary,
+            initial_flock_centroid=initial_flock_centroid,
         )
         
         self.action_decoder = HighLevelAction()

@@ -52,4 +52,5 @@ python3 train_ppo.py \
     --use_linear_lr_decay \
     --use_clipped_value_loss \
     --use_reward_normalization \
+    --no-disk-boundary \
     --formation_delta 2>&1

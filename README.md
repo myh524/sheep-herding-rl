@@ -26,6 +26,7 @@ python train_hierarchical.py \
 - **`--save-sheep-trajectory-dir DIR`**：每个 episode 结束后在 `DIR` 下保存一张「全体羊轨迹 + 平滑质心」PNG；若文件已存在会自动加 `_1`、`_2`… 不覆盖。误写 **`/figures/...`** 时也会按仓库内 **`figures/...`** 解析（与 `--save-visual-dir` 相同）。
 - **`--save-visual-every K`**（`K` 为正整数）：每 `K` 个环境 step 在 **`render_env` 之后**保存当前整图 PNG。首次启用时在 **`--save-visual-dir`**（可选）下自动新建子目录 `sheep{N}_herder{H}_时间戳/`；未指定时默认根目录为仓库内 **`figures/viz_snapshots/`**。文件名：`sheep{N}_herder{H}_ep{episode}_step{步数}.png`。  
   若误写成根路径 **`/figures/...`**（会触发权限错误），程序会改为使用**仓库根下**的 **`figures/...`**；推荐直接写 **`figures/my_viz_snapshots`** 或绝对路径如 **`$PWD/figures/...`**。
+- **`--initial-flock-centroid CX CY`**（可选）：指定羊群**初始质心**（世界坐标）；每 episode `reset` 时在该点附近成团撒羊，**不传则质心仍随机**。底层为 `SheepFlockEnv(..., initial_flock_centroid=(CX, CY))`，超出矩形/圆盘可行域时会裁剪到合法范围。
 - 与训练一致时按需加：`--formation_delta`、`--no-disk-boundary`、`--herder_teleport`（狗瞬移到编队槽位）、`--high_level_interval` 等；详见 `python visualize.py -h`。
 - Shell 里可用环境变量拼进 `EXTRA`（示例见 `scripts/visualize.sh` 注释）：`VIS_SAVE_GIF`、`VIS_STOCHASTIC`、`VIS_FORMATION_DELTA`、`VIS_HERDER_TELEPORT`。
 
