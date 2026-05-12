@@ -352,6 +352,13 @@ def parse_args():
         help='若指定目录，则每个 episode 结束后在该目录保存一张「全部羊轨迹」PNG（自动创建目录）。若以 /figures/ 开头会按仓库内 figures/ 解析',
     )
     parser.add_argument(
+        '--save-herder-trajectory-dir',
+        type=str,
+        default=None,
+        metavar='DIR',
+        help='若指定目录，则每个 episode 结束后保存一张「每只机械狗轨迹」PNG：折线从初始位置到当前位置，起点不加点，终点用小圆点表示当前位置。路径规则同 --save-sheep-trajectory-dir',
+    )
+    parser.add_argument(
         '--save-visual-every',
         type=int,
         default=None,
@@ -554,6 +561,7 @@ class Visualizer:
         self._interactive = _matplotlib_is_interactive()
         self._gui_shown = False
         self._sheep_traj_buffer: Optional[List[np.ndarray]] = None
+        self._herder_traj_buffer: Optional[List[np.ndarray]] = None
         self._visual_snapshot_dir: Optional[str] = None
 
     def _init_visual_snapshots_if_needed(self) -> None:
@@ -856,6 +864,12 @@ class Visualizer:
             return np.zeros((0, 2), dtype=np.float64)
         return np.asarray(pos, dtype=np.float64).reshape(-1, 2)
 
+    def _herder_positions_now(self) -> np.ndarray:
+        h = self.env.scenario.get_herder_positions()
+        if h is None or len(h) == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+        return np.asarray(h, dtype=np.float64).reshape(-1, 2)
+
     @staticmethod
     def _smooth_xy_traj(xy: np.ndarray, half_window: Optional[int] = None) -> np.ndarray:
         """对 (T,2) 路径做各维独立的时间滑动平均；half_window 为单侧邻域点数，None 时按轨迹长度自适应。"""
@@ -878,6 +892,19 @@ class Visualizer:
     def _allocate_sheep_trajectory_path(out_dir: str, model_stem: str, episode_num: int) -> str:
         """在 out_dir 下生成不覆盖已存在文件的 PNG 路径。"""
         base = f"sheep_trajectory_{model_stem}_ep{int(episode_num):03d}"
+        path = os.path.join(out_dir, f"{base}.png")
+        if not os.path.isfile(path):
+            return path
+        k = 1
+        while True:
+            path = os.path.join(out_dir, f"{base}_{k}.png")
+            if not os.path.isfile(path):
+                return path
+            k += 1
+
+    @staticmethod
+    def _allocate_herder_trajectory_path(out_dir: str, model_stem: str, episode_num: int) -> str:
+        base = f"herder_trajectory_{model_stem}_ep{int(episode_num):03d}"
         path = os.path.join(out_dir, f"{base}.png")
         if not os.path.isfile(path):
             return path
@@ -1063,7 +1090,115 @@ class Visualizer:
         fig_traj.savefig(path, dpi=150)
         plt.close(fig_traj)
         print(f"  羊轨迹图已保存: {path}")
-        
+
+    def _save_herder_trajectory_figure(self, episode_num: int) -> None:
+        out_dir = getattr(self.args, "save_herder_trajectory_dir", None)
+        if not out_dir or self._herder_traj_buffer is None:
+            return
+        buf = self._herder_traj_buffer
+        if len(buf) == 0:
+            print("  跳过机械狗轨迹图: 无采样点")
+            return
+        traj = np.stack(buf, axis=0)
+        n_h = int(traj.shape[1])
+        if n_h == 0:
+            print("  跳过机械狗轨迹图: 当前无机械狗")
+            return
+        os.makedirs(out_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(self.args.model_path))[0]
+        path = self._allocate_herder_trajectory_path(out_dir, stem, episode_num)
+
+        fig_h, ax_h = plt.subplots(figsize=(10, 10))
+        (x0, x1), (y0, y1), draw_disk = self._arena_view()
+        ax_h.set_xlim(x0, x1)
+        ax_h.set_ylim(y0, y1)
+        ax_h.set_aspect("equal")
+        ax_h.set_facecolor("#f5f5f5")
+        if draw_disk:
+            R = float(self.env.scenario.world_radius)
+            ax_h.add_patch(
+                patches.Circle(
+                    (0.0, 0.0),
+                    R,
+                    fill=False,
+                    edgecolor="0.5",
+                    linewidth=1.2,
+                    linestyle="--",
+                )
+            )
+        else:
+            Wx, Wy = float(self.env.world_size[0]), float(self.env.world_size[1])
+            hx, hy = Wx / 2.0, Wy / 2.0
+            ax_h.add_patch(
+                patches.Rectangle(
+                    (-hx, -hy),
+                    Wx,
+                    Wy,
+                    fill=False,
+                    edgecolor="0.65",
+                    linewidth=1.0,
+                    linestyle="--",
+                )
+            )
+        target = self.env.scenario.get_target_position()
+        ax_h.add_patch(
+            patches.Circle(
+                (float(target[0]), float(target[1])),
+                5.0,
+                color="green",
+                alpha=0.25,
+                zorder=2,
+            )
+        )
+        ax_h.scatter(
+            float(target[0]),
+            float(target[1]),
+            c="green",
+            s=180,
+            marker="*",
+            zorder=8,
+            edgecolors="darkgreen",
+            linewidths=0.8,
+            label="Target",
+        )
+
+        cmap = plt.get_cmap("tab10")
+        for i in range(n_h):
+            color = cmap(i % 10)
+            xs = traj[:, i, 0]
+            ys = traj[:, i, 1]
+            ax_h.plot(
+                xs,
+                ys,
+                "-",
+                color=color,
+                lw=2.0,
+                alpha=0.9,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                label=f"Herder {i}",
+                zorder=4,
+            )
+            ax_h.scatter(
+                float(xs[-1]),
+                float(ys[-1]),
+                color=color,
+                s=64,
+                marker="o",
+                zorder=9,
+                edgecolors="0.15",
+                linewidths=0.9,
+            )
+
+        ax_h.set_title("机械狗轨迹（折线起点=初始位置，终点圆点=当前位置）")
+        ax_h.grid(True, alpha=0.3)
+        self._apply_axis_display_tick_labels(ax_h)
+        ax_h.legend(loc="upper right", fontsize=8, ncol=2)
+        fig_h.tight_layout()
+        fig_h.savefig(path, dpi=150)
+        plt.close(fig_h)
+        print(f"  机械狗轨迹图已保存: {path}")
+
     def run_episode(self, episode_num: int, total_episodes: int):
         print(f"\n{'='*50}")
         print(f"Episode {episode_num}/{total_episodes}")
@@ -1076,7 +1211,13 @@ class Visualizer:
             self._sheep_traj_buffer = [self._sheep_positions_now()]
         else:
             self._sheep_traj_buffer = None
-        
+
+        if getattr(self.args, "save_herder_trajectory_dir", None):
+            os.makedirs(self.args.save_herder_trajectory_dir, exist_ok=True)
+            self._herder_traj_buffer = [self._herder_positions_now()]
+        else:
+            self._herder_traj_buffer = None
+
         if self.fig is None:
             self.setup_figure()
         
@@ -1096,6 +1237,8 @@ class Visualizer:
             obs, reward, done, info = self.env.step(actions_env)
             if self._sheep_traj_buffer is not None:
                 self._sheep_traj_buffer.append(self._sheep_positions_now())
+            if self._herder_traj_buffer is not None:
+                self._herder_traj_buffer.append(self._herder_positions_now())
 
             self.state.current_step += 1
             self.state.total_reward += reward
@@ -1136,7 +1279,9 @@ class Visualizer:
         print(f"  Result: {'SUCCESS!' if self.state.success else 'FAILED'}")
         if getattr(self.args, "save_sheep_trajectory_dir", None):
             self._save_sheep_trajectory_figure(episode_num)
-        
+        if getattr(self.args, "save_herder_trajectory_dir", None):
+            self._save_herder_trajectory_figure(episode_num)
+
         return self.state.success, self.state.total_reward, self.state.current_step
     
     def run(self):
@@ -1184,6 +1329,9 @@ def main():
     args = parse_args()
     args.save_sheep_trajectory_dir = _rewrite_root_figures_typo_path(
         getattr(args, "save_sheep_trajectory_dir", None)
+    )
+    args.save_herder_trajectory_dir = _rewrite_root_figures_typo_path(
+        getattr(args, "save_herder_trajectory_dir", None)
     )
     args.save_visual_dir = _rewrite_root_figures_typo_path(
         getattr(args, "save_visual_dir", None)

@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 # 无显示器时可: VIS_SAVE_GIF=/tmp/run.gif bash scripts/visualize.sh
 # 与训练 rollout 一致、策略按分布随机采样: VIS_STOCHASTIC=1 bash scripts/visualize.sh
 # 训练时若用了 --formation_delta，此处需: VIS_FORMATION_DELTA=1 bash scripts/visualize.sh
-# 默认使用势场运动学（狗逐步走向编队点）。若需旧式瞬移: VIS_HERDER_TELEPORT=1 bash scripts/visualize.sh
+# 机械狗轨迹（每 episode 一张 PNG）: VIS_SAVE_HERDER_TRAJECTORY_DIR=figures/herder_trajectories bash scripts/visualize.sh
 EXTRA=()
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && [ -n "${VIS_SAVE_GIF:-}" ]; then
     EXTRA+=(--save_gif "$VIS_SAVE_GIF")
@@ -34,6 +34,9 @@ if [ -n "${VIS_FORMATION_DELTA:-}" ]; then
 fi
 if [ -n "${VIS_HERDER_TELEPORT:-}" ]; then
     EXTRA+=(--herder_teleport)
+fi
+if [ -n "${VIS_SAVE_HERDER_TRAJECTORY_DIR:-}" ]; then
+    EXTRA+=(--save-herder-trajectory-dir "$VIS_SAVE_HERDER_TRAJECTORY_DIR")
 fi
 
 python visualize.py \

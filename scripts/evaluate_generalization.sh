@@ -92,7 +92,7 @@ echo "=========================================="
 python3 evaluate_generalization.py \
     --model_path "$MODEL_PATH" \
     --num_episodes "$NUM_EPISODES" \
-    --episode_length 250
+    --episode_length 250 \
     --no-disk-boundary \
     --herder_teleport
     "${OUT_ARGS[@]}" \
