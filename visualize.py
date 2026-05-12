@@ -776,11 +776,12 @@ class Visualizer:
                 nh_t = int(traj.shape[1])
                 for i in range(nh_t):
                     xy = traj[:, i, :].astype(np.float64)
+                    xy_smoothed = self._smooth_xy_traj(xy, half_window=1)
                     color = cmap(i % 10)
                     self.ax.plot(
-                        xy[:, 0],
-                        xy[:, 1],
-                        "-",
+                        xy_smoothed[:, 0],
+                        xy_smoothed[:, 1],
+                        "--",
                         color=color,
                         linewidth=1.85,
                         alpha=0.78,

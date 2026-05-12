@@ -4,7 +4,7 @@
 # 默认参数
 # MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
 MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_112928/models/model_8402400.pt}"
-MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_180810/models/model_5882400.pt}"
+# MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_180810/models/model_5882400.pt}"
 # MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260506_184044/models/model_1202400.pt}"
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
@@ -43,7 +43,7 @@ fi
 python visualize.py \
     --model_path "$MODEL_PATH" \
     --num_episodes 5 \
-    --num_sheep 15 \
+    --num_sheep 20 \
     --num_herders 5 \
     --world_size 100 100 \
     --episode_length 200 \
