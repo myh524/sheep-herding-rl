@@ -27,6 +27,7 @@ python train_hierarchical.py \
 - **`--save-visual-every K`**（`K` 为正整数）：每 `K` 个环境 step 在 **`render_env` 之后**保存当前整图 PNG。首次启用时在 **`--save-visual-dir`**（可选）下自动新建子目录 `sheep{N}_herder{H}_时间戳/`；未指定时默认根目录为仓库内 **`figures/viz_snapshots/`**。文件名：`sheep{N}_herder{H}_ep{episode}_step{步数}.png`。  
   若误写成根路径 **`/figures/...`**（会触发权限错误），程序会改为使用**仓库根下**的 **`figures/...`**；推荐直接写 **`figures/my_viz_snapshots`** 或绝对路径如 **`$PWD/figures/...`**。
 - **`--initial-flock-centroid CX CY`**（可选）：指定羊群**初始质心**（世界坐标）；每 episode `reset` 时在该点附近成团撒羊，**不传则质心仍随机**。底层为 `SheepFlockEnv(..., initial_flock_centroid=(CX, CY))`，超出矩形/圆盘可行域时会裁剪到合法范围。
+- **`--no-disk-boundary`**：与 `train_ppo` 一致，`enforce_disk_boundary=False` 时羊/狗**位置**按 **`world_size` 矩形**仅用于初始化等语义时不再用圆盘裁剪；**高层编队槽位**也不再裁进圆盘或 `world_size` 矩形（仅保留狗间最小距修正）。`SheepScenario.update_herders` 末尾不把狗裁进圆。若仍启用 **`--low-level-model-dir`**，低层写回狗位置时同样不强制圆盘。
 - 与训练一致时按需加：`--formation_delta`、`--no-disk-boundary`、`--herder_teleport`（狗瞬移到编队槽位）、`--high_level_interval` 等；详见 `python visualize.py -h`。
 - Shell 里可用环境变量拼进 `EXTRA`（示例见 `scripts/visualize.sh` 注释）：`VIS_SAVE_GIF`、`VIS_STOCHASTIC`、`VIS_FORMATION_DELTA`、`VIS_HERDER_TELEPORT`。
 

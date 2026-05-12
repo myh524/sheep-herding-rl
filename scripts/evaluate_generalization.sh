@@ -22,6 +22,7 @@
 set -euo pipefail
 
 MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_112928/models/model_8402400.pt}"
 NUM_EPISODES="${2:-50}"
 OUTPUT_JSON="${3:-}"
 
@@ -91,6 +92,7 @@ echo "=========================================="
 python3 evaluate_generalization.py \
     --model_path "$MODEL_PATH" \
     --num_episodes "$NUM_EPISODES" \
+    --episode_length 250
     --no-disk-boundary \
     --herder_teleport
     "${OUT_ARGS[@]}" \

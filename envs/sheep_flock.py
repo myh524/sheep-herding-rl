@@ -338,9 +338,14 @@ class SheepFlockEnv:
             )
             R = float(self.scenario.world_radius)
             for i in range(self.num_herders):
-                self.scenario.herder_positions[i] = clip_position_to_disk(
-                    new_pos[i], R
-                ).astype(np.float32)
+                if self.enforce_disk_boundary:
+                    self.scenario.herder_positions[i] = clip_position_to_disk(
+                        new_pos[i], R
+                    ).astype(np.float32)
+                else:
+                    self.scenario.herder_positions[i] = np.asarray(
+                        new_pos[i], dtype=np.float32
+                    ).reshape(2)
         else:
             self.scenario.update_herders(self.dt)
         
@@ -381,8 +386,8 @@ class SheepFlockEnv:
 
         Physical constraints:
         - Minimum distance between herders
-        - Safe distance from flock boundary
-        - World boundary constraints
+        - Safe distance from flock boundary (仅 enforce_disk_boundary=True 时：槽位裁进圆盘)
+        - 无圆盘时：槽位坐标不裁剪到 world_size 矩形
         """
         action = actions[0] if actions.ndim > 1 else actions
         flock_center = self.scenario.get_flock_center()
@@ -448,11 +453,13 @@ class SheepFlockEnv:
                     pos = pos + correction
                     positions[j] = positions[j] - correction
             
-            R = float(self.scenario.world_radius)
-            lim = max(R - flock_safe_distance, 0.5)
-            pos = clip_position_to_disk(pos, lim)
-            
-            positions[i] = pos
+            if self.enforce_disk_boundary:
+                R = float(self.scenario.world_radius)
+                lim = max(R - flock_safe_distance, 0.5)
+                pos = clip_position_to_disk(pos, lim).astype(np.float32)
+            # enforce_disk_boundary=False：高层槽位不裁剪到 world_size 矩形，仅保留上面狗间最小距修正
+
+            positions[i] = np.asarray(pos, dtype=np.float32)
         
         return positions
 

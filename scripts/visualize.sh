@@ -38,18 +38,18 @@ fi
 
 python visualize.py \
     --model_path "$MODEL_PATH" \
-    --num_episodes 1 \
-    --num_sheep 25 \
+    --num_episodes 5 \
+    --num_sheep 15 \
     --num_herders 5 \
     --world_size 100 100 \
-    --initial-flock-centroid 28 28 \
-    --episode_length 150 \
-    --render_delay 1 \
+    --episode_length 200 \
+    --render_delay 100 \
     --formation_delta \
     --high_level_interval 1 \
     --no-disk-boundary \
-    --save-sheep-trajectory-dir /figures/sheep_trajectories \
-    --herder_teleport \
+    # --save-sheep-trajectory-dir /figures/sheep_trajectories \
+    # --herder_teleport \
+    # --initial-flock-centroid 45 45 \
     # --herder_teleport \
     # --save-sheep-trajectory-dir /figures/sheep_trajectories \
     # --save-visual-every 20 \
