@@ -115,8 +115,14 @@ _MATPLOTLIB_BACKEND = _configure_matplotlib_backend(_FORCE_HEADLESS)
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.ticker import FuncFormatter
-from matplotlib.widgets import Button
 from typing import Any, Dict, List, Optional, Tuple
+
+_SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from matplotlib_zh import setup_matplotlib_chinese, zh_font  # noqa: E402
+
+setup_matplotlib_chinese()
 
 if _MATPLOTLIB_BACKEND.lower() == "agg":
     warnings.filterwarnings(
@@ -156,6 +162,14 @@ EVASION_ZONE_ZORDER = 2
 
 # 仅改坐标轴刻度「读数」：数据仍为真实 world 米制；场地图形边界在刻度上读成 ± 该值（总跨度 2×）
 VIZ_AXIS_LABEL_DISPLAY_HALF = 250.0
+
+# 右上角图例（相对原 fontsize=8 / markersize 10|15 再放大）
+VIZ_LEGEND_FONTSIZE = 22
+VIZ_LEGEND_MARKER_SIZE_TARGET = 30
+VIZ_LEGEND_MARKER_SIZE_DEFAULT = 20
+VIZ_LEGEND_HANDLEHEIGHT = 1.4
+VIZ_LEGEND_HANDLELENGTH = 4.0
+VIZ_LEGEND_MARKERSCALE = 2.0
 
 
 @dataclass
@@ -672,16 +686,8 @@ class Visualizer:
         self._apply_axis_display_tick_labels(self.ax)
 
         if self._interactive:
-            ax_pause = plt.axes([0.85, 0.01, 0.12, 0.04])
-            self.btn_pause = Button(ax_pause, 'Pause/Resume')
-            self.btn_pause.on_clicked(self.toggle_pause)
             self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
-        else:
-            self.btn_pause = None
-        
-    def toggle_pause(self, event):
-        self.paused = not self.paused
-        
+
     def on_key_press(self, event):
         if event.key == ' ':
             self.paused = not self.paused
@@ -856,29 +862,35 @@ class Visualizer:
             alpha=0.9,
             marker="s",
             edgecolors="darkblue",
-            label="Herder",
+            label="机械狗",
             zorder=HERDER_SCATTER_ZORDER,
         )
         
         legend_elements = [
             plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='green', 
-                      markersize=15, label='Target'),
+                      markersize=VIZ_LEGEND_MARKER_SIZE_TARGET, label='目标'),
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
-                      markersize=10, markeredgecolor='black', label='Sheep'),
+                      markersize=VIZ_LEGEND_MARKER_SIZE_DEFAULT, markeredgecolor='black', label='羊'),
             plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='blue',
-                      markersize=10, markeredgecolor='darkblue', label='Herder'),
+                      markersize=VIZ_LEGEND_MARKER_SIZE_DEFAULT, markeredgecolor='darkblue', label='机械狗'),
             # 与上方金色圆一并关闭图例项；恢复圆时取消注释。
             # patches.Patch(
             #     facecolor="gold",
             #     alpha=FORMATION_SAMPLE_CIRCLE_ALPHA,
             #     edgecolor="darkorange",
             #     linewidth=1.0,
-            #     label="Sampled target",
+            #     label="编队采样点",
             # ),
             patches.Patch(facecolor='blue', alpha=0.08, edgecolor='blue',
-                         linestyle='--', label='Evasion Zone'),
+                         linestyle='--', label='避让区'),
         ]
-        self.ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+        self.ax.legend(
+            handles=legend_elements,
+            loc='upper right',
+            prop=zh_font(size=VIZ_LEGEND_FONTSIZE),
+            handleheight=VIZ_LEGEND_HANDLEHEIGHT,
+            handlelength=VIZ_LEGEND_HANDLELENGTH,
+        )
         self.ax.grid(True, alpha=0.3)
         self._apply_axis_display_tick_labels(self.ax)
 
@@ -989,7 +1001,7 @@ class Visualizer:
             zorder=8,
             edgecolors="darkgreen",
             linewidths=0.8,
-            label="Target",
+            label="目标",
         )
 
         _tab = plt.get_cmap("tab10")
@@ -1004,7 +1016,7 @@ class Visualizer:
                 color=color,
                 lw=1.6,
                 alpha=0.88,
-                label=f"Sheep {i}",
+                label=f"羊 {i}",
                 zorder=3,
             )
             ax_traj.scatter(
@@ -1039,7 +1051,7 @@ class Visualizer:
             alpha=0.92,
             solid_capstyle="round",
             solid_joinstyle="round",
-            label="Flock centroid (smoothed)",
+            label="羊群质心（平滑）",
             zorder=5,
         )
         # 沿质心轨迹箭头表示运动方向（随长度自适应数量）
@@ -1091,7 +1103,14 @@ class Visualizer:
 
         ax_traj.grid(True, alpha=0.3)
         self._apply_axis_display_tick_labels(ax_traj)
-        ax_traj.legend(loc="upper right", fontsize=8, ncol=2)
+        ax_traj.legend(
+            loc="upper right",
+            prop=zh_font(size=VIZ_LEGEND_FONTSIZE),
+            ncol=2,
+            markerscale=VIZ_LEGEND_MARKERSCALE,
+            handleheight=VIZ_LEGEND_HANDLEHEIGHT,
+            handlelength=VIZ_LEGEND_HANDLELENGTH,
+        )
         fig_traj.tight_layout()
         fig_traj.savefig(path, dpi=150)
         plt.close(fig_traj)

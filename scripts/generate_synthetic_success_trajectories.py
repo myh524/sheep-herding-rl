@@ -18,6 +18,13 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.ticker import FuncFormatter
 
+_SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from matplotlib_zh import setup_matplotlib_chinese, zh_font  # noqa: E402
+
+setup_matplotlib_chinese()
+
 VIZ_AXIS_LABEL_DISPLAY_HALF = 250.0
 
 
@@ -213,7 +220,7 @@ def render_trajectory_png(
         zorder=8,
         edgecolors="darkgreen",
         linewidths=0.8,
-        label="Target",
+        label="目标",
     )
 
     n_sheep = traj.shape[1]
@@ -229,7 +236,7 @@ def render_trajectory_png(
             color=color,
             lw=1.6,
             alpha=0.88,
-            label=f"Sheep {i}",
+            label=f"羊 {i}",
             zorder=3,
         )
         ax.scatter(
@@ -264,7 +271,7 @@ def render_trajectory_png(
         alpha=0.92,
         solid_capstyle="round",
         solid_joinstyle="round",
-        label="Flock centroid (smoothed)",
+        label="羊群质心（平滑）",
         zorder=5,
     )
     ax.scatter(
@@ -290,7 +297,7 @@ def render_trajectory_png(
 
     ax.grid(True, alpha=0.3)
     apply_axis_display_tick_labels(ax, sx, sy)
-    ax.legend(loc="upper right", fontsize=8, ncol=2)
+    ax.legend(loc="upper right", prop=zh_font(size=22), ncol=2)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

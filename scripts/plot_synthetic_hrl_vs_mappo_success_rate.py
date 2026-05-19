@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Synthetic success-rate-vs-steps curves (HRL vs MAPPO), qualitatively aligned with reward script."""
+"""合成成功率随训练步数曲线（分层 HRL vs MAPPO），与回报脚本在定性上一致。"""
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from matplotlib_zh import setup_matplotlib_chinese, zh_font
 from scipy.ndimage import gaussian_filter1d
 
 
@@ -22,43 +31,43 @@ def moving_average(x: np.ndarray, window: int) -> np.ndarray:
 
 
 def hrl_success_fraction(steps: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Rises with main reward ascent; plateaus high; mild late drift (matches reward story)."""
+    """随主回报上升而升高；高位平台；后期轻微漂移（与回报曲线叙事一致）。"""
     s = steps.astype(float)
     smax = float(s.max())
-    # Backbone: logistic + slight overshoot then settle (like reward curve near plateau)
+    # 骨干：逻辑斯蒂 + 略冲顶后回落（类似回报曲线近平台段）
     u = (s - 1.42e5) / 3.85e4
     base = 0.935 / (1.0 + np.exp(-u))
-    # Small pullback band during mid-rise (task still hard briefly)
+    # 上升中段小幅回撤带（任务仍短暂较难）
     dip = -0.045 * np.exp(-0.5 * ((s - 1.72e5) / 1.15e4) ** 2)
     base = base + dip
-    # Late ripple (policy still subject to layout / stochastic dynamics)
+    # 后期波纹（策略仍受布局 / 随机动力学影响）
     base = base + 0.022 * np.sin(s / 3.2e4) * (1.0 / (1.0 + np.exp(-(s - 2.8e5) / 4.8e4)))
     base = base + 0.014 * np.sin(s / 8.2e3) * (1.0 / (1.0 + np.exp(-(s - 1.15e5) / 2.5e4))) * (
         1.0 / (1.0 + np.exp((s - 2.95e5) / 1.35e4))
     )
-    # Localized wiggle (evaluation / scenario randomness in mid–late training)
+    # 局部摆动（中后期训练中的评估 / 场景随机性）
     z = rng.normal(0.0, 1.0, size=len(s))
     z = gaussian_filter1d(z, sigma=7.8, mode="nearest")
     env = np.exp(-0.5 * ((s - 2.55e5) / 5.5e4) ** 2) + 0.55 * np.exp(-0.5 * ((s - 3.6e5) / 4.8e4) ** 2)
     base = base + 0.052 * env * z
-    # Occasional “bad rollout windows” (still high overall)
+    # 偶发「差采样轨迹窗口」（整体仍偏高）
     for _ in range(8):
         c = rng.uniform(0.2, 0.88) * smax
         w = rng.uniform(3800.0, 14000.0)
         base -= rng.uniform(0.032, 0.078) * np.exp(-0.5 * ((s - c) / w) ** 2)
-    # Tail: very flat high success
+    # 尾部：近乎平坦的高成功率
     gf = np.clip((s - 0.78 * smax) / (0.22 * smax), 0.0, 1.0)
     base = base * (1.0 - 0.012 * gf**2) + 0.008 * gf**2
     return np.clip(base, 0.0, 1.0)
 
 
 def mappo_success_fraction(steps: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Slower rise, low late plateau (~36% after noise/tail); volatile mid-training."""
+    """上升更慢，后期平台偏低（加噪 / 尾部后约 36%）；中期波动大。"""
     s = steps.astype(float)
     smax = float(s.max())
     u = (s - 3.42e5) / 9.5e4
     base = 0.298 / (1.0 + np.exp(-u))
-    # Mild lift in 4e5–6e5 band (same x-axis story as reward script, smaller amplitude)
+    # 4e5–6e5 段温和抬升（与回报脚本横轴叙事一致，幅度更小）
     u4 = np.clip((s - 4.0e5) / 2.0e5, 0.0, 1.0)
     base = base + 0.026 * (0.5 * (1.0 - np.cos(np.pi * np.clip(u4 / 0.58, 0.0, 1.0))))
     gate_46 = (1.0 / (1.0 + np.exp(-(s - 3.997e5) / 1.8e3))) * (1.0 / (1.0 + np.exp((s - 6.003e5) / 1.8e3)))
@@ -91,12 +100,12 @@ def main() -> None:
         / "synthetic_hrl_vs_mappo_training_success_rate.png",
     )
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--n", type=int, default=3000)
+    parser.add_argument("--n", type=int, default=3000, help="沿步数轴的采样点数")
     parser.add_argument(
         "--window",
         type=int,
         default=26,
-        help="smoothing window (smaller = more visible stochasticity)",
+        help="平滑窗口（越小则随机波动越明显）",
     )
     args = parser.parse_args()
 
@@ -105,7 +114,7 @@ def main() -> None:
     smax = float(steps.max())
 
     h_frac = hrl_success_fraction(steps, rng)
-    # Rolling success ≈ binomial-like variance ~ sqrt(p(1-p)); early training noisier
+    # 滚动成功率 ≈ 二项式方差 ~ sqrt(p(1-p))；早期训练噪声更大
     p_for_var = np.clip(h_frac, 0.08, 0.98)
     h_binomial_scale = 0.132 * np.sqrt(np.clip(p_for_var * (1.0 - p_for_var), 0.02, 0.25))
     early_boost = 0.42 + 0.58 * np.clip(1.0 - steps / 2.35e5, 0.28, 1.0)
@@ -150,9 +159,9 @@ def main() -> None:
         x[idx] = (x[idx] - cur_m) * (std_t / max(cur_s, 1e-6)) + mean_t
         x[idx] = np.clip(x[idx], 0.0, 1.0)
 
-    # MAPPO tail kept <36% (smoothed near end); no late boost on MAPPO
+    # MAPPO 尾部保持 <36%（末端平滑后）；MAPPO 无后期抬升
     affine_tail_frac(m_raw, tail_idx, mean_t=0.32, std_t=0.048)
-    # HRL: strong but not near-saturation (~92–94% late; stochastic task ceiling)
+    # HRL：较高但未近饱和（后期约 92–94%；随机任务上限）
     affine_tail_frac(h_raw, tail_idx, mean_t=0.925, std_t=0.045)
 
     h_smooth = moving_average(h_raw, args.window)
@@ -165,15 +174,11 @@ def main() -> None:
     h_smooth_pct = h_smooth * 100.0
     m_smooth_pct = m_smooth * 100.0
 
-    plt.rcParams.update(
+    setup_matplotlib_chinese(
         {
             "figure.dpi": 150,
             "savefig.dpi": 200,
             "font.size": 12,
-            "font.family": "serif",
-            "font.serif": ["Times New Roman", "DejaVu Serif", "DejaVu Sans"],
-            "mathtext.fontset": "stix",
-            "axes.unicode_minus": False,
             "axes.grid": True,
             "grid.color": "#cccccc",
             "grid.linewidth": 0.6,
@@ -194,7 +199,7 @@ def main() -> None:
         color=blue,
         linewidth=2.3,
         alpha=0.98,
-        label="Hierarchical RL (smoothed)",
+        label="分层强化学习",
         zorder=3,
         solid_capstyle="round",
     )
@@ -205,18 +210,18 @@ def main() -> None:
         color=red,
         linewidth=2.3,
         alpha=0.98,
-        label="MAPPO (smoothed)",
+        label="MAPPO",
         zorder=3,
         solid_capstyle="round",
     )
 
-    ax.set_xlabel("Training Steps", fontsize=14)
-    ax.set_ylabel("Episode Success Rate (%)", fontsize=14)
+    ax.set_xlabel("训练步数", fontproperties=zh_font(size=14))
+    ax.set_ylabel("回合成功率（%）", fontproperties=zh_font(size=14))
     ax.set_xlim(0.0, 6.0e5)
     ax.set_ylim(0.0, 100.0)
     ax.tick_params(axis="both", which="major", labelsize=12)
     ax.ticklabel_format(style="sci", axis="x", useMathText=True, scilimits=(5, 5))
-    ax.legend(loc="lower right", framealpha=0.95, fontsize=11)
+    ax.legend(loc="lower right", framealpha=0.95, prop=zh_font(size=11))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, format="png")

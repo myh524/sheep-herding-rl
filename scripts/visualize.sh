@@ -2,10 +2,10 @@
 # 可视化运行脚本
 # 加载训练好的模型并实时渲染环境
 # 默认参数
-# MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260410_171812/models/model_3602400.pt}"
 MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_112928/models/model_8402400.pt}"
 # MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260511_180810/models/model_5882400.pt}"
-# MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260506_184044/models/model_1202400.pt}"
+MODEL_PATH="${1:-results/sheep_herding/gpu_train/ppo/seed1/20260512_175805/models/model_8882400.pt}"
 # 检查模型文件是否存在
 if [ ! -f "$MODEL_PATH" ]; then
     echo "错误: 模型文件不存在: $MODEL_PATH"
@@ -40,10 +40,28 @@ if [ -n "${VIS_SAVE_VISUAL_HERDER_TRAILS:-}" ]; then
     EXTRA+=(--save-visual-herder-trails)
 fi
 
+# 可选参数：取消对应行的注释即可启用（路径 /figures/... 会解析到仓库内 figures/）
+VIS_OPT_SNAPSHOT_DIR=()
+VIS_OPT_SNAPSHOT_DIR=(--save-sheep-trajectory-dir figures/sheep_trajectories)  # 每局结束保存全羊轨迹 PNG
+
+VIS_OPT_HERDER_TELEPORT=()
+VIS_OPT_HERDER_TELEPORT=(--herder_teleport)  # 机械狗瞬移到编队点（关闭运动学，需与训练一致）
+
+VIS_OPT_FLOCK_INIT=()
+VIS_OPT_FLOCK_INIT=(--initial-flock-centroid 40 -40)  # 固定羊群初始质心（世界坐标，米）
+
+VIS_OPT_LOW_LEVEL=()
+# VIS_OPT_LOW_LEVEL=(--low-level-model-dir InforMARL/onpolicy/results/GraphMPE/navigation_graph/rmappo/informarl/run5/models)  # 联合高低层：加载 InforMARL 低层 Graph MAPPO
+
+# 步进快照（已启用）：每 N 步将当前 matplotlib 画面存 PNG；目录默认 figures/viz_snapshots/<sheepN_herderM_时间戳>/
+#   --save-visual-every K     每 K 个环境 step 保存一帧（需已 render）
+#   --save-visual-dir DIR     快照根目录（默认仓库 figures/viz_snapshots/）
+#   --save-visual-herder-trails  快照上叠加本回合至今的机械狗轨迹折线
+
 python visualize.py \
     --model_path "$MODEL_PATH" \
-    --num_episodes 5 \
-    --num_sheep 20 \
+    --num_episodes 1 \
+    --num_sheep 15 \
     --num_herders 5 \
     --world_size 100 100 \
     --episode_length 200 \
@@ -51,17 +69,13 @@ python visualize.py \
     --formation_delta \
     --high_level_interval 1 \
     --no-disk-boundary \
-    --save-visual-every 20 \
-    --save-visual-dir figures/viz_snapshots \
-    --save-visual-herder-trails \
-    # --save-sheep-trajectory-dir /figures/sheep_trajectories \
-    # --herder_teleport \
-    # --initial-flock-centroid 45 45 \
-    # --herder_teleport \
-    # --save-sheep-trajectory-dir /figures/sheep_trajectories \
-    # --save-visual-every 20 \
-    # --save-visual-dir /figures/my_viz_snapshots \
-    # --herder_teleport \
-    # --save-sheep-trajectory-dir /figures/sheep_trajectories \
-    # --low-level-model-dir InforMARL/onpolicy/results/GraphMPE/navigation_graph/rmappo/informarl/run5/models \
+    "${VIS_OPT_SNAPSHOT_DIR[@]}" \
+    "${VIS_OPT_HERDER_TELEPORT[@]}" \
+    "${VIS_OPT_FLOCK_INIT[@]}" \
+    "${VIS_OPT_LOW_LEVEL[@]}" \
     "${EXTRA[@]}"
+
+
+    # --save-visual-every 20 \
+    # --save-visual-dir figures/viz_snapshots \
+    # --save-visual-herder-trails \
