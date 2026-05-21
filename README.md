@@ -1,109 +1,182 @@
 # Sheep Herding RL
 
-羊群引导强化学习：高层编队策略 + 可选 **MAPPO 低层导航**（[`InforMARL/`](InforMARL/)）对接。
+羊群引导强化学习：高层 PPO 编队策略，可选 **InforMARL Graph MAPPO** 低层导航（[`InforMARL/`](InforMARL/)）联合仿真。
 
 ## 文档
 
-- **[分层环境与 MAPPO 低层对接：修改说明与使用教程（中文）](docs/hierarchical_mappo_integration_zh.md)** — 包含全部改动文件列表、参数说明、命令行/Python 示例、FAQ 与训练阶段建议。
+| 文档 | 说明 |
+|------|------|
+| **[docs/TECHNICAL.md](docs/TECHNICAL.md)** | 与当前源码同步的技术说明（观测/动作、奖励、目录结构） |
+| **[README_CN.md](README_CN.md)** | 中文详细文档（算法分析、训练调参、FAQ 等） |
 
-## 快速开始（高层 + 低层动力学）
+共享默认超参集中在 **[`envs/defaults.py`](envs/defaults.py)**（场地尺寸、episode 长度、课程阶段、`formation_delta` 上限等），各入口通过引用该文件保持一致。
 
-需安装 PyTorch；低层权重目录中应有 `actor.pt`（或与训练一致的 checkpoint）。
+## 环境要求与安装
+
+- Python 3.10+（推荐）
+- PyTorch、CUDA（GPU 训练时）
+
+```bash
+cd sheep-herding-rl
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+可选：无显示器保存 GIF/快照时无需 `python3-tk`；交互式弹窗时 `visualize.py` 会按 `DISPLAY` 自动尝试 TkAgg → Qt5Agg → …，失败则回退 Agg。
+
+## 仓库结构（核心）
+
+```
+sheep-herding-rl/
+├── envs/                    # SheepFlockEnv、场景、低层 MAPPO 桥接
+├── onpolicy/                # PPO 策略与 buffer
+├── train_ppo.py             # 主训练入口
+├── train_hierarchical.py    # 分层训练（CLI 同 train_ppo，启用低层）
+├── evaluate_policy.py       # 单配置评估
+├── evaluate_generalization.py  # 羊数×狗数网格泛化评估
+├── visualize.py             # Rollout 可视化
+├── plot_generalization.py   # 泛化折线图
+├── scripts/                 # Shell 与配图/示意脚本
+├── figures/                 # 轨迹图、GIF、评估图等输出（git 可忽略部分）
+├── docs/TECHNICAL.md
+└── InforMARL/               # Graph MAPPO 子项目（低层导航）
+```
+
+## 训练
+
+### 仅高层 PPO（默认）
+
+```bash
+python train_ppo.py \
+  --device cuda \
+  --num_sheep 10 --num_herders 3 \
+  --world_size 100 100 \
+  --formation_delta \
+  --no-disk-boundary \
+  --num_env_steps 1000000
+```
+
+常用开关（与评估/可视化对齐）：
+
+- **`--formation_delta`**：观测 13 维，动作 `a[0:3]` 为编队增量（与 10 维绝对编队 checkpoint 不兼容）
+- **`--no-disk-boundary`**：羊/狗不受圆盘裁剪；坐标轴按 `world_size` 矩形
+- **`--herder_teleport`**：机械狗瞬移到编队槽位（关闭势场运动学，常用于课程早期）
+- **`--use_curriculum`**：课程学习，阶段定义见 `envs/defaults.py` → `DEFAULT_CURRICULUM_STAGE_SPECS`
+- **`--high_level_interval N`**：每 N 个环境步刷新一次高层编队
+
+GPU + 课程示例：
+
+```bash
+bash scripts/train_gpu.sh
+```
+
+### 高层 + 低层 MAPPO 动力学
+
+需已训练的低层权重目录（含 `actor.pt` 或与训练一致的 checkpoint）：
 
 ```bash
 python train_hierarchical.py \
   --low-level-model-dir /path/to/mappo_run/models \
-  --num-herders 3 --world-size 100 100 \
+  --num-herders 3 --world_size 100 100 \
+  --formation_delta --no-disk-boundary \
   # ... 其余参数同 train_ppo.py
 ```
 
-仅训练高层、不用低层时，不传 `--low-level-model-dir` 即可，行为与原先一致。
+不传 `--low-level-model-dir` 时行为与 `train_ppo.py` 一致（仅高层 + 内置势场低层）。
 
-## 可视化与羊轨迹图
+## 评估
 
-使用根目录 **`visualize.py`**（或直接跑 **`scripts/visualize.sh`**）。常用要点：
-
-- **`--save-sheep-trajectory-dir DIR`**：每个 episode 结束后在 `DIR` 下保存一张「全体羊轨迹 + 平滑质心」PNG；若文件已存在会自动加 `_1`、`_2`… 不覆盖。误写 **`/figures/...`** 时也会按仓库内 **`figures/...`** 解析（与 `--save-visual-dir` 相同）。
-- **`--save-visual-every K`**（`K` 为正整数）：每 `K` 个环境 step 在 **`render_env` 之后**保存当前整图 PNG。首次启用时在 **`--save-visual-dir`**（可选）下自动新建子目录 `sheep{N}_herder{H}_时间戳/`；未指定时默认根目录为仓库内 **`figures/viz_snapshots/`**。文件名：`sheep{N}_herder{H}_ep{episode}_step{步数}.png`。  
-  若误写成根路径 **`/figures/...`**（会触发权限错误），程序会改为使用**仓库根下**的 **`figures/...`**；推荐直接写 **`figures/my_viz_snapshots`** 或绝对路径如 **`$PWD/figures/...`**。
-- **`--initial-flock-centroid CX CY`**（可选）：指定羊群**初始质心**（世界坐标）；每 episode `reset` 时在该点附近成团撒羊，**不传则质心仍随机**。底层为 `SheepFlockEnv(..., initial_flock_centroid=(CX, CY))`，超出矩形/圆盘可行域时会裁剪到合法范围。
-- **`--no-disk-boundary`**：与 `train_ppo` 一致，`enforce_disk_boundary=False` 时羊/狗**位置**按 **`world_size` 矩形**仅用于初始化等语义时不再用圆盘裁剪；**高层编队槽位**也不再裁进圆盘或 `world_size` 矩形（仅保留狗间最小距修正）。`SheepScenario.update_herders` 末尾不把狗裁进圆。若仍启用 **`--low-level-model-dir`**，低层写回狗位置时同样不强制圆盘。
-- 与训练一致时按需加：`--formation_delta`、`--no-disk-boundary`、`--herder_teleport`（狗瞬移到编队槽位）、`--high_level_interval` 等；详见 `python visualize.py -h`。
-- Shell 里可用环境变量拼进 `EXTRA`（示例见 `scripts/visualize.sh` 注释）：`VIS_SAVE_GIF`、`VIS_STOCHASTIC`、`VIS_FORMATION_DELTA`、`VIS_HERDER_TELEPORT`。
-
-示例（在仓库根目录执行）：
+### 单配置
 
 ```bash
-python visualize.py --model_path /path/to/model.pt --save-sheep-trajectory-dir figures/sheep_trajectories
+python evaluate_policy.py --model_path /path/to/model.pt --num_episodes 100
 # 或
-bash scripts/visualize.sh /path/to/model.pt
+bash scripts/evaluate_policy.sh /path/to/model.pt 100
 ```
 
-## 泛化评估（羊数 × 狗数网格）
+### 泛化网格（羊数 × 狗数）
 
-在**多种羊群规模与机械狗数量**下用**同一 checkpoint** 批量评估，对比：
+在多种羊群规模与机械狗数量下用**同一 checkpoint** 批量评估成功率、完成步数、结束时羊群扩散度等。
 
-- **平均成功率**
-- **平均完成步数**（默认到达目标后提前结束 episode，步数才有区分度；见下）
-- **episode 结束时羊群扩散度**（`flock_spread`：羊相对质心距离的样本标准差；脚本同时给出「仅成功」与「全体」均值）
+- 实现：[`evaluate_generalization.py`](evaluate_generalization.py)、[`plot_generalization.py`](plot_generalization.py)
+- 脚本：[`scripts/evaluate_generalization.sh`](scripts/evaluate_generalization.sh)、重绘 [`scripts/plot_generalization_json.py`](scripts/plot_generalization_json.py)
 
-实现：**[`evaluate_generalization.py`](evaluate_generalization.py)**（根目录）、绘图模块 **[`plot_generalization.py`](plot_generalization.py)**。便捷封装：**[`scripts/evaluate_generalization.sh`](scripts/evaluate_generalization.sh)**；仅重绘：**[`scripts/plot_generalization_json.py`](scripts/plot_generalization_json.py)**。
+默认网格：羊 **5, 10, 15, 20, 25** × 狗 **3, 4, 5, 6**。自定义：`python3 evaluate_generalization.py -h`（`--sheep_counts`、`--herder_counts`）。
 
-默认网格：羊 **5, 10, 15, 20, 25** × 狗 **3, 4, 5, 6**。自定义列表见 `python3 evaluate_generalization.py -h`（`--sheep_counts`、`--herder_counts`）。
-
-**默认动力学（与常见训练一致）**：**不启用圆盘边界**（无 `--disk-boundary` 即等价原 `--no-disk-boundary`）、**`--high_level_interval` 默认为 3**、**不传 `--herder_teleport`**（机械狗为**势场运动学**，非瞬移）。若需圆盘约束，显式加 `--disk-boundary`。
+**默认动力学（与常见训练一致）**：不启用圆盘边界（无 `--disk-boundary`）、**`--high_level_interval` 默认为 3**、不传 `--herder_teleport`（势场运动学）。`formation_delta` 一般不必手写：脚本会从 checkpoint 推断观测维（10 或 13），13 维时自动打开。
 
 ```bash
-# 直接调用 Python（推荐先看 -h）
 python3 evaluate_generalization.py \
   --model_path /path/to/model.pt \
   --num_episodes 50 \
   --output_json figures/generalization/grid_eval.json \
   --output_figures figures/generalization/plots
 
-# 仅根据已有 JSON 重绘折线图（无需重跑评估）
-python3 scripts/plot_generalization_json.py figures/generalization/grid_eval.json \
-  -o figures/generalization/plots_redraw
-
-# 或使用脚本：参数为 <模型> [每格episode数] [JSON路径，可省略]
 bash scripts/evaluate_generalization.sh /path/to/model.pt 50 figures/generalization/grid_eval.json
-# 折线图：GEN_OUTPUT_FIGURES=figures/generalization/plots bash scripts/evaluate_generalization.sh …
 ```
 
-折线图说明：每个指标一张宽图，**左**为横轴羊群数量 N、多条线对应不同机械狗数 H；**右**为横轴机械狗数、多条线对应不同羊群规模。生成文件包括 `gen_lines_success.png`、`gen_lines_steps_success.png`、`gen_lines_spread_success.png`，以及全体回合的 `gen_lines_steps_all.png`、`gen_lines_spread_all.png`（可选前缀 `--figure_prefix`）。图中坐标轴与图例为**英文**（`N`/`H`），避免无中文字体环境缺字。写入 JSON 时会在字段 `figure_paths` 中记录绝对路径。
+环境变量（Shell）：`GEN_SEED`、`GEN_PER_COMBO_SEED=1`、`GEN_RUN_FULL_HORIZON=1`、`GEN_DISK_BOUNDARY=1`、`GEN_HERDER_TELEPORT=1`、`GEN_HIGH_LEVEL_INTERVAL=N`、`GEN_OUTPUT_FIGURES=...`。完整参数见 `python3 evaluate_generalization.py -h`。
 
-**`formation_delta` 一般不必手写**：脚本会从 checkpoint 推断观测维（10 或 13），若为 13 维则自动打开 `formation_delta`，避免权重与观测维不一致。
+折线图：`gen_lines_success.png`、`gen_lines_steps_success.png`、`gen_lines_spread_success.png` 等；坐标轴与图例为英文（`N`/`H`）。
 
-其它与 `evaluate_policy.py` 一致的开关仍可按需追加（例如消融时 `--herder_teleport`、`--disk-boundary`）。
+## 可视化与羊轨迹图
 
-Shell 脚本可通过环境变量传入部分常用项，例如：
+入口：**[`visualize.py`](visualize.py)** 或 **`bash scripts/visualize.sh <model_path>`**。
 
-- `GEN_SEED=0`、`GEN_PER_COMBO_SEED=1`：可复现性
-- `GEN_RUN_FULL_HORIZON=1`：不因到达目标提前结束（每 episode 固定跑满 `--episode_length`）
-- `GEN_FORMATION_DELTA=1`：强制编队增量观测（通常不必）
-- `GEN_DISK_BOUNDARY=1`：启用圆盘边界；`GEN_HERDER_TELEPORT=1`：瞬移狗（非默认）；`GEN_HIGH_LEVEL_INTERVAL=5`：覆盖默认 3
+`scripts/visualize.sh` 默认启用 `--formation_delta`、`--no-disk-boundary`、`--high_level_interval 1`，并可通过注释块启用快照目录、低层 MAPPO、固定初始质心等。环境变量：
 
-完整参数仍以 `python3 evaluate_generalization.py -h` 为准。
+| 变量 | 作用 |
+|------|------|
+| `VIS_SAVE_GIF` | 保存 GIF（已存在则自动 `_1`、`_2`…） |
+| `VIS_DEVICE` | 推理设备；有显示器时默认 `cpu` 避免与 GUI 抢 GPU |
+| `VIS_STOCHASTIC=1` | 策略按分布采样 |
+| `VIS_FORMATION_DELTA=1` | 强制编队增量观测 |
+| `VIS_HERDER_TELEPORT=1` | 机械狗瞬移 |
+| `VIS_SAVE_VISUAL_HERDER_TRAILS=1` | 步进快照上叠加机械狗轨迹折线 |
 
-## 合成轨迹与合成曲线（演示 / 配图用）
+常用 CLI（详见 `python visualize.py -h`）：
 
-以下脚本**不加载真实策略环境**，仅生成与当前论文式图表风格相近的示意数据，用于报告或对比图占位。
+- **`--save-sheep-trajectory-dir DIR`**：每 episode 结束后保存「全体羊轨迹 + 平滑质心」PNG；路径以 `/figures/...` 开头时解析为仓库内 `figures/...`
+- **`--save-visual-every K`**：每 K 步保存当前画面 PNG；默认子目录 `figures/viz_snapshots/sheep{N}_herder{H}_时间戳/`
+- **`--save-visual-herder-trails`**：快照上绘制本回合机械狗轨迹
+- **`--initial-flock-centroid CX CY`**：固定羊群初始质心；不传则随机
+- **`--low-level-model-dir`**：联合 InforMARL 低层 Graph MAPPO
+- **`--no-disk-boundary`**、**`--formation_delta`**、**`--herder_teleport`**、**`--high_level_interval`**：与训练保持一致
 
-| 脚本 | 作用 | 默认输出 |
-|------|------|----------|
-| [`scripts/generate_synthetic_failure_trajectories.py`](scripts/generate_synthetic_failure_trajectories.py) | 低成功率、羊群被冲散的合成轨迹 | `figures/sheep_trajectories/sheep_trajectory_synthetic_failure_low_success_ep*.png` |
-| [`scripts/generate_synthetic_curved_overshoot_trajectories.py`](scripts/generate_synthetic_curved_overshoot_trajectories.py) | 弯弧逼近目标 → 刹不住略穿出 → 略带回的示意轨迹 | `figures/sheep_trajectories/sheep_trajectory_synthetic_curved_overshoot_ep*.png` |
-| [`scripts/plot_synthetic_hrl_vs_mappo_reward.py`](scripts/plot_synthetic_hrl_vs_mappo_reward.py) | 分层 HRL vs MAPPO 合成**回报**曲线（平滑 + 半透明原始） | `figures/synthetic_hrl_vs_mappo_training_reward.png` |
-| [`scripts/plot_synthetic_hrl_vs_mappo_success_rate.py`](scripts/plot_synthetic_hrl_vs_mappo_success_rate.py) | 同上风格合成**成功率（%）**曲线 | `figures/synthetic_hrl_vs_mappo_training_success_rate.png` |
+```bash
+python visualize.py --model_path /path/to/model.pt \
+  --save-sheep-trajectory-dir figures/sheep_trajectories
 
-轨迹类常用参数：`--out_dir`、`--num_plots`、`--num_sheep`、`--num_steps`、`--seed`。绘图类另支持：`--out`、`--seed`、`--n`（横轴采样点数）、`--window`（滑动平均窗宽）。
+bash scripts/visualize.sh /path/to/model.pt
+```
+
+## 辅助脚本（配图 / 示意）
+
+以下脚本**不加载真实策略**，用于报告配图或几何示意。
+
+| 脚本 | 作用 |
+|------|------|
+| [`scripts/generate_synthetic_failure_trajectories.py`](scripts/generate_synthetic_failure_trajectories.py) | 低成功率、羊群冲散示意轨迹 |
+| [`scripts/generate_synthetic_success_trajectories.py`](scripts/generate_synthetic_success_trajectories.py) | 成功引导至目标示意轨迹 |
+| [`scripts/generate_synthetic_near_miss.py`](scripts/generate_synthetic_near_miss.py) | 「擦肩而过」折返示意轨迹 |
+| [`scripts/plot_synthetic_hrl_vs_mappo_reward.py`](scripts/plot_synthetic_hrl_vs_mappo_reward.py) | 分层 HRL vs MAPPO 合成回报曲线 |
+| [`scripts/plot_synthetic_hrl_vs_mappo_success_rate.py`](scripts/plot_synthetic_hrl_vs_mappo_success_rate.py) | 合成成功率曲线 |
+| [`scripts/generate_formation_gallery.py`](scripts/generate_formation_gallery.py) | 12 张典型编队站位网格图 |
+| [`scripts/visualize_flock_envelope.py`](scripts/visualize_flock_envelope.py) | 羊群四向径向包络与 AABB 示意 |
+| [`scripts/formation_sliders.py`](scripts/formation_sliders.py) | 交互式编队参数滑块 |
 
 ```bash
 python3 scripts/generate_synthetic_failure_trajectories.py --num_plots 4
 python3 scripts/plot_synthetic_hrl_vs_mappo_reward.py
-python3 scripts/plot_synthetic_hrl_vs_mappo_success_rate.py
+python3 scripts/generate_formation_gallery.py -o figures/formation_gallery.png
+```
+
+## 测试
+
+```bash
+python -m pytest tests/ -q
 ```
 
 ## 子项目
 
-- [`InforMARL/`](InforMARL/)：Graph MAPPO / InforMARL 导航训练代码；经主仓库 patch 支持 `--external_goals` 与宿主写入 landmark。
+- **[`InforMARL/`](InforMARL/)**：Graph MAPPO / InforMARL 多智能体导航；经主仓库 patch 支持 `--external_goals` 与宿主写入 landmark，供 `envs/low_level_mappo_bridge.py` 对接。

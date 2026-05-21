@@ -7,6 +7,7 @@ Linux / SSH 无 DISPLAY 时默认使用 Agg 后端（不弹窗），用 time.sle
 """
 
 import argparse
+import gc
 import os
 import sys
 import time
@@ -196,6 +197,23 @@ def _rewrite_root_figures_typo_path(path: Optional[str]) -> Optional[str]:
     return raw
 
 
+def _allocate_nonconflicting_path(path: str) -> str:
+    """若目标文件已存在，则在扩展名前追加 _1、_2…，避免覆盖历史 GIF/视频。"""
+    path = os.path.abspath(str(path).strip())
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if not os.path.isfile(path):
+        return path
+    root, ext = os.path.splitext(path)
+    k = 1
+    while True:
+        candidate = f"{root}_{k}{ext}"
+        if not os.path.isfile(candidate):
+            return candidate
+        k += 1
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='可视化运行训练好的PPO模型')
     
@@ -355,7 +373,26 @@ def parse_args():
     parser.add_argument('--stacked_frames', type=int, default=1)
     
     parser.add_argument('--save_gif', type=str, default=None)
+    parser.add_argument(
+        '--gif_fps',
+        type=int,
+        default=20,
+        help='保存 GIF/视频时的帧率',
+    )
+    parser.add_argument(
+        '--gif_scale',
+        type=float,
+        default=0.5,
+        help='保存 GIF 时每帧缩放比例（<1 可显著降低内存与磁盘占用，默认 0.5）',
+    )
     parser.add_argument('--save_video', type=str, default=None)
+    parser.add_argument(
+        '--device',
+        type=str,
+        default=None,
+        choices=['cpu', 'cuda', 'auto'],
+        help='推理设备；未指定时交互式弹窗默认 cpu，无窗口时 auto 优先 cuda',
+    )
     parser.add_argument(
         '--save-sheep-trajectory-dir',
         type=str,
@@ -562,7 +599,8 @@ class Visualizer:
         self.fig = None
         self.ax = None
         self.paused = False
-        self.frames = []
+        self._gif_writer = None
+        self._gif_path: Optional[str] = None
         
         self.rnn_states_actor = None
         self.rnn_states_critic = None
@@ -575,6 +613,67 @@ class Visualizer:
         self._sheep_traj_buffer: Optional[List[np.ndarray]] = None
         self._herder_trail_buffer: Optional[List[np.ndarray]] = None
         self._visual_snapshot_dir: Optional[str] = None
+
+    def _init_gif_writer_if_needed(self) -> None:
+        path = getattr(self.args, "save_gif", None) or getattr(self.args, "save_video", None)
+        if not path or self._gif_writer is not None:
+            return
+        try:
+            import imageio.v2 as imageio
+        except ImportError:
+            try:
+                import imageio  # type: ignore
+            except ImportError:
+                print("Warning: 需要 imageio 才能保存 GIF/视频 (pip install imageio)", flush=True)
+                return
+        requested = str(path)
+        self._gif_path = _allocate_nonconflicting_path(requested)
+        if self._gif_path != os.path.abspath(requested):
+            print(
+                f"GIF/视频: 目标已存在，改为写入 {self._gif_path}",
+                flush=True,
+            )
+        fps = max(1, int(getattr(self.args, "gif_fps", 20)))
+        self._gif_writer = imageio.get_writer(self._gif_path, mode="I", fps=fps)
+        scale = float(getattr(self.args, "gif_scale", 0.5))
+        print(
+            f"GIF/视频: 流式写入 {self._gif_path}（fps={fps}, scale={scale}，不缓存全部帧）",
+            flush=True,
+        )
+
+    def _append_gif_frame(self) -> None:
+        if self._gif_writer is None or self.fig is None:
+            return
+        self.fig.canvas.draw()
+        frame = np.asarray(self.fig.canvas.renderer.buffer_rgba())
+        rgb = np.ascontiguousarray(frame[..., :3])
+        scale = float(getattr(self.args, "gif_scale", 0.5))
+        if 0 < scale < 1.0:
+            h, w = rgb.shape[:2]
+            nh = max(1, int(h * scale))
+            nw = max(1, int(w * scale))
+            try:
+                from PIL import Image
+
+                rgb = np.asarray(
+                    Image.fromarray(rgb).resize((nw, nh), Image.Resampling.LANCZOS)
+                )
+            except ImportError:
+                step_y = max(1, h // nh)
+                step_x = max(1, w // nw)
+                rgb = rgb[::step_y, ::step_x, :]
+        self._gif_writer.append_data(rgb)
+
+    def _close_gif_writer(self) -> None:
+        if self._gif_writer is None:
+            return
+        try:
+            self._gif_writer.close()
+        except Exception:
+            pass
+        self._gif_writer = None
+        if self._gif_path:
+            print(f"GIF/视频已保存: {self._gif_path}", flush=True)
 
     def _init_visual_snapshots_if_needed(self) -> None:
         k = getattr(self.args, "save_visual_every", None)
@@ -1122,6 +1221,7 @@ class Visualizer:
         
         if self.fig is None:
             self.setup_figure()
+        self._init_gif_writer_if_needed()
         
         for step in range(self.env.episode_length):
             while self.paused:
@@ -1156,12 +1256,13 @@ class Visualizer:
                 self._gui_shown = True
 
             if self.args.save_gif or self.args.save_video:
-                self.fig.canvas.draw()
-                self.frames.append(np.array(self.fig.canvas.renderer.buffer_rgba()))
+                self._append_gif_frame()
 
             delay_s = self.args.render_delay / 1000.0
             if self._interactive:
                 plt.pause(delay_s)
+                if hasattr(self.fig.canvas, "flush_events"):
+                    self.fig.canvas.flush_events()
             else:
                 time.sleep(delay_s)
                 iv = self.args.headless_progress_interval
@@ -1170,6 +1271,9 @@ class Visualizer:
                         f"  step {self.state.current_step}/{self.env.episode_length}",
                         flush=True,
                     )
+
+            if self.state.current_step % 50 == 0:
+                gc.collect()
 
             self.current_obs = obs
 
@@ -1203,28 +1307,10 @@ class Visualizer:
         print(f"Success rate: {sum(successes)}/{len(successes)} ({sum(successes)/len(successes)*100:.1f}%)")
         print(f"Average reward: {np.mean(total_rewards):.3f}")
         
-        if self.args.save_gif:
-            self.save_gif(self.args.save_gif)
-        if self.args.save_video:
-            self.save_video(self.args.save_video)
+        self._close_gif_writer()
         
         plt.close('all')
-    
-    def save_gif(self, path: str):
-        try:
-            import imageio
-            imageio.mimsave(path, self.frames, fps=20)
-            print(f"GIF saved to: {path}")
-        except ImportError:
-            print("Warning: imageio required to save GIF")
-    
-    def save_video(self, path: str):
-        try:
-            import imageio
-            imageio.mimsave(path, self.frames, fps=20)
-            print(f"Video saved to: {path}")
-        except ImportError:
-            print("Warning: imageio required to save video")
+        gc.collect()
 
 
 def main():
@@ -1246,8 +1332,24 @@ def main():
             "（或安装 PyQt5），再在有 DISPLAY 的会话中运行。",
         )
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dev_arg = getattr(args, "device", None)
+    if dev_arg == "cpu":
+        device = torch.device("cpu")
+    elif dev_arg == "cuda":
+        device = torch.device("cuda")
+    elif dev_arg == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif _matplotlib_is_interactive():
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    if device.type == "cuda" and _matplotlib_is_interactive():
+        print(
+            "提示: 弹窗可视化时 GPU 可能与桌面显示争抢导致卡顿；"
+            "可设 VIS_DEVICE=cpu 或加 --device cpu。",
+            flush=True,
+        )
     if args.stochastic_policy:
         print("Policy: 随机采样动作 (--stochastic_policy，与训练 rollout 一致)")
         if args.seed is not None:
