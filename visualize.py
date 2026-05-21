@@ -120,7 +120,13 @@ from typing import Any, Dict, List, Optional, Tuple
 _SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
-from matplotlib_zh import setup_matplotlib_chinese, zh_font  # noqa: E402
+from matplotlib_zh import (  # noqa: E402
+    setup_matplotlib_chinese,
+    sheep_trajectory_legend,
+    viz_panel_legend,
+    VIZ_LEGEND_MARKER_SIZE_DEFAULT,
+    VIZ_LEGEND_MARKER_SIZE_TARGET,
+)
 
 setup_matplotlib_chinese()
 
@@ -162,15 +168,6 @@ EVASION_ZONE_ZORDER = 2
 
 # 仅改坐标轴刻度「读数」：数据仍为真实 world 米制；场地图形边界在刻度上读成 ± 该值（总跨度 2×）
 VIZ_AXIS_LABEL_DISPLAY_HALF = 250.0
-
-# 右上角图例（相对原 fontsize=8 / markersize 10|15 再放大）
-VIZ_LEGEND_FONTSIZE = 22
-VIZ_LEGEND_MARKER_SIZE_TARGET = 30
-VIZ_LEGEND_MARKER_SIZE_DEFAULT = 20
-VIZ_LEGEND_HANDLEHEIGHT = 1.4
-VIZ_LEGEND_HANDLELENGTH = 4.0
-VIZ_LEGEND_MARKERSCALE = 2.0
-
 
 @dataclass
 class VisualizationState:
@@ -884,13 +881,7 @@ class Visualizer:
             patches.Patch(facecolor='blue', alpha=0.08, edgecolor='blue',
                          linestyle='--', label='避让区'),
         ]
-        self.ax.legend(
-            handles=legend_elements,
-            loc='upper right',
-            prop=zh_font(size=VIZ_LEGEND_FONTSIZE),
-            handleheight=VIZ_LEGEND_HANDLEHEIGHT,
-            handlelength=VIZ_LEGEND_HANDLELENGTH,
-        )
+        viz_panel_legend(self.ax, legend_elements)
         self.ax.grid(True, alpha=0.3)
         self._apply_axis_display_tick_labels(self.ax)
 
@@ -1103,14 +1094,7 @@ class Visualizer:
 
         ax_traj.grid(True, alpha=0.3)
         self._apply_axis_display_tick_labels(ax_traj)
-        ax_traj.legend(
-            loc="upper right",
-            prop=zh_font(size=VIZ_LEGEND_FONTSIZE),
-            ncol=2,
-            markerscale=VIZ_LEGEND_MARKERSCALE,
-            handleheight=VIZ_LEGEND_HANDLEHEIGHT,
-            handlelength=VIZ_LEGEND_HANDLELENGTH,
-        )
+        sheep_trajectory_legend(ax_traj)
         fig_traj.tight_layout()
         fig_traj.savefig(path, dpi=150)
         plt.close(fig_traj)

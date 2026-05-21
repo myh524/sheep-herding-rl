@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from matplotlib import font_manager
 
@@ -115,16 +115,38 @@ def zh_font(**kwargs) -> font_manager.FontProperties:
     return font_manager.FontProperties(fname=_FONT_PATH, **kwargs)
 
 
-# 与 visualize.py --save-sheep-trajectory-dir 羊轨迹 PNG 右上角图例一致
-TRAJECTORY_LEGEND_FONTSIZE = 22
-TRAJECTORY_LEGEND_MARKERSCALE = 2.0
-TRAJECTORY_LEGEND_HANDLEHEIGHT = 1.4
-TRAJECTORY_LEGEND_HANDLELENGTH = 4.0
+# 与 visualize.py 主视图 / formation_sliders 右上角图例一致
+VIZ_LEGEND_FONTSIZE = 22
+VIZ_LEGEND_MARKER_SIZE_TARGET = 30
+VIZ_LEGEND_MARKER_SIZE_DEFAULT = 20
+VIZ_LEGEND_HANDLEHEIGHT = 1.4
+VIZ_LEGEND_HANDLELENGTH = 4.0
+VIZ_LEGEND_MARKERSCALE = 2.0
+
+# 羊轨迹 PNG（条目多、双列）
+TRAJECTORY_LEGEND_FONTSIZE = VIZ_LEGEND_FONTSIZE
+TRAJECTORY_LEGEND_MARKERSCALE = VIZ_LEGEND_MARKERSCALE
+TRAJECTORY_LEGEND_HANDLEHEIGHT = VIZ_LEGEND_HANDLEHEIGHT
+TRAJECTORY_LEGEND_HANDLELENGTH = VIZ_LEGEND_HANDLELENGTH
 
 
-def sheep_trajectory_legend(ax, **overrides):
+def viz_panel_legend(ax, handles: List[Any], *, ncol: int = 1, loc: str = "upper right", **overrides: Any):
+    """交互/主视图固定样式图例（visualize.py、formation_sliders.py）。"""
+    kw: Dict[str, Any] = {
+        "handles": handles,
+        "loc": loc,
+        "ncol": ncol,
+        "prop": zh_font(size=VIZ_LEGEND_FONTSIZE),
+        "handleheight": VIZ_LEGEND_HANDLEHEIGHT,
+        "handlelength": VIZ_LEGEND_HANDLELENGTH,
+    }
+    kw.update(overrides)
+    return ax.legend(**kw)
+
+
+def sheep_trajectory_legend(ax, **overrides: Any):
     """羊轨迹 PNG 图例（visualize.sh / 合成轨迹脚本共用）。"""
-    kw = {
+    kw: Dict[str, Any] = {
         "loc": "upper right",
         "prop": zh_font(size=TRAJECTORY_LEGEND_FONTSIZE),
         "ncol": 2,
