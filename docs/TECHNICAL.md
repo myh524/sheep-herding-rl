@@ -1,6 +1,6 @@
 # 羊群引导强化学习项目 — 技术文档
 
-本文档与仓库**当前源码**同步维护（观测 10 维、羊质心圆弧解码、可选编队增量模式等）。若与 `README_CN.md` 冲突，以 `envs/`、`train_ppo.py` 及本文为准。
+本文档与仓库**当前源码**同步维护。用户向说明见 [README.md](../README.md)、[README_CN.md](../README_CN.md)；默认超参见 [envs/defaults.py](../envs/defaults.py)。若文档间冲突，以 `envs/`、`train_ppo.py` 及本文为准。
 
 ---
 
@@ -8,21 +8,23 @@
 
 ### 1.1 问题定义
 
-在二维圆形场地内，用若干「机械狗（herder）」引导一群遵循类 Boids 规则的「羊（sheep）」，使羊群质心接近场地中心的目标点。本项目训练的是**单智能体高层策略**：按 `high_level_interval` 刷新编队时输出 5 维有界动作；其中**仅 `a[0]–a[2]`** 参与解码（`a[3]、a[4]` 在解码器内强制为 0）。解码得到各机械狗在**以羊质心为圆心**的圆弧上的二维目标位置；低层由 `SheepScenario.update_herders` 做趋向目标与近距避羊，或使用 `--herder_teleport` 瞬移。
+在二维场地内，用若干「机械狗（herder）」引导遵循类 Boids 规则的「羊（sheep）」，使羊群质心接近目标（默认圆心 `(0,0)`）。本项目训练**单智能体高层策略**：按 `high_level_interval` 刷新编队时输出 5 维有界动作；**仅 `a[0]–a[2]`** 参与解码（`a[3]、a[4]` 在解码器内置 0）。解码得到各机械狗在**以羊质心为圆心**的圆弧上的二维目标位置。
 
-### 1.2 分层架构（概念）
+### 1.2 分层架构
 
-| 层级 | 职责 | 本项目范围 |
-|------|------|------------|
-| 高层 | 决定羊质心圆弧几何：`θ_in`（弧中点→羊）、半径 `R`、张角（由 coverage 映射） | PPO 训练 |
-| 低层 | 机械狗趋向目标、近距避羊 | `SheepScenario.update_herders` 或 `--herder_teleport` |
+| 层级 | 职责 | 实现 |
+|------|------|------|
+| 高层 | 羊质心圆弧几何：`θ_in`、半径 `R`、张角（coverage） | PPO（`train_ppo.py`） |
+| 低层（内置） | 趋向目标 + 近羊群排斥 | `SheepScenario.update_herders` |
+| 低层（可选） | Graph MAPPO 子步导航 | `envs/low_level_mappo_bridge.py` + [InforMARL](../InforMARL/) |
+| 低层（瞬移） | 狗直接到槽位 | `--herder_teleport` |
 
 ### 1.3 技术栈
 
-- **语言**：Python 3  
-- **深度学习**：PyTorch（`requirements.txt`：`torch>=1.12,<3`，`numpy<2`）  
-- **环境接口**：OpenAI Gym `spaces.Box`（`gym>=0.21,<1`）  
-- **日志与可视化**：TensorBoard、Matplotlib；可选 OpenCV / Pillow  
+- **语言**：Python 3.10+（推荐）
+- **深度学习**：PyTorch（`requirements.txt`：`torch>=1.12,<3`，`numpy<2`）
+- **环境接口**：OpenAI Gym `spaces.Box`（`gym>=0.21,<1`）
+- **日志与可视化**：TensorBoard、Matplotlib；可选 OpenCV / Pillow
 
 ---
 
@@ -31,115 +33,120 @@
 ```
 sheep-herding-rl/
 ├── envs/
-│   ├── sheep_flock.py             # SheepFlockEnv：步进、奖励、编队积分器、Gym 空间
-│   ├── sheep_scenario.py          # 场景：羊/狗/目标、10 维观测、Boids+逃避、狗更新
-│   ├── sheep_entity.py            # 单羊状态与力积分（与向量化路径对齐）
-│   ├── herder_entity.py           # 质点速度/加速度模型（主循环未使用）
-│   ├── high_level_action.py       # 羊质心圆弧解码；STANCE_RADIUS_*；FormationAnalyzer
-│   └── curriculum_env.py          # 课程、随机化（转发 formation_delta / high_level_interval）
+│   ├── defaults.py                # 默认超参、课程阶段、奖励系数（单源）
+│   ├── sheep_flock.py             # SheepFlockEnv：步进、奖励、编队积分器
+│   ├── sheep_scenario.py          # 羊/狗/目标、观测、Boids、狗更新
+│   ├── sheep_entity.py
+│   ├── herder_entity.py           # 主循环未使用
+│   ├── high_level_action.py       # 羊质心圆弧解码
+│   ├── curriculum_env.py          # 课程 / 随机化
+│   └── low_level_mappo_bridge.py  # InforMARL 低层子步
 ├── onpolicy/
 │   ├── algorithms/ppo_actor_critic.py
-│   └── utils/                     # ppo_buffer、reward_normalizer、valuenorm 等
-├── train_ppo.py                   # 主训练入口（含 --formation_delta、--high_level_interval）
-├── evaluate_policy.py             # 评估（OBS_LABELS 仍为旧语义，见 §9）
-├── visualize.py                   # Rollout 可视化
+│   └── utils/
+├── train_ppo.py
+├── train_hierarchical.py          # 调用 train_ppo.main，启用低层 CLI
+├── evaluate_policy.py
+├── evaluate_generalization.py     # 羊数×狗数网格评估
+├── plot_generalization.py
+├── visualize.py
 ├── scripts/
-│   ├── train_gpu.sh               # GPU + 课程示例
-│   ├── visualize.sh               # 可视化入口
-│   └── formation_sliders.py       # 交互式队形（与解码一致，羊质心系）
-├── tests/test_env_cpu_parity.py
-├── requirements.txt
+│   ├── train_gpu.sh
+│   ├── visualize.sh
+│   ├── evaluate_generalization.sh
+│   ├── plot_generalization_json.py
+│   ├── formation_sliders.py
+│   └── generate_synthetic_*.py    # 示意配图（非仿真）
+├── tests/
+├── docs/TECHNICAL.md
 ├── README.md / README_CN.md
-└── docs/TECHNICAL.md              # 本文档
+└── InforMARL/
 ```
 
 ---
 
 ## 3. 世界与坐标系
 
-### 3.1 圆形场地
+### 3.1 场地与目标
 
-- `world_size = (W, H)` → `world_radius = min(W, H) / 2`（`world_radius_from_size`）。  
-- 合法位置：`clip_position_to_disk`，`|p| ≤ world_radius`。  
-- **目标固定在圆心 `(0,0)`**。`sample_random_target_position` 为兼容保留，**恒返回原点**。
+- `world_size = (W, H)` → `world_radius = min(W, H) / 2`。
+- **`enforce_disk_boundary=True`（默认）**：位置 `clip_position_to_disk`，羊受圆边界 Boids 斥力；高层槽位可裁进 `|p| ≤ world_radius - 3`。
+- **`enforce_disk_boundary=False`（`--no-disk-boundary`）**：羊/狗不裁圆盘、无圆边界力；绘图按矩形 `world_size`；**高层槽位不裁进圆盘或矩形**（仅狗间最小距 2.0 m）。低层 MAPPO 写回狗位时同样不强制圆盘。
+- **目标固定在圆心 `(0,0)`**；`sample_random_target_position` 恒返回原点。
 
 ### 3.2 时间离散
 
-- `dt` 默认 `2.0`。  
-- `episode_length`：最大环境步数。  
-- `end_episode_when_at_target`：默认 `False`，跑满长度以便学习抵达后滞留；为 `True` 时进入目标阈值可提前结束。
+- `dt` 默认 **2.0**（`envs/defaults.py` → `DEFAULT_DT`）。
+- `episode_length` 按入口区分（勿混用）：
+
+| 入口 | 默认常量 |
+|------|----------|
+| `SheepFlockEnv` 基类 | `DEFAULT_FLOCK_EPISODE_LENGTH` = 100 |
+| `train_ppo.py` | `DEFAULT_TRAIN_EPISODE_LENGTH` = 150 |
+| `evaluate_policy.py` | `DEFAULT_EVAL_EPISODE_LENGTH` = 100 |
+| `visualize.py` | `DEFAULT_VIS_EPISODE_LENGTH` = 150 |
+| 课程各阶段 | 见 `DEFAULT_CURRICULUM_STAGE_SPECS`（多为 200–300） |
+
+- `end_episode_when_at_target`：默认 `False`；评估/泛化默认可提前结束以统计完成步数。
+
+### 3.3 初始羊群质心
+
+`SheepFlockEnv(..., initial_flock_centroid=(cx, cy))`：每 `reset` 在该点附近成团撒羊；超出可行域时裁剪。`visualize.py --initial-flock-centroid CX CY` 暴露该参数。
 
 ---
 
 ## 4. 智能体接口：观测与动作
 
-### 4.1 主观测（基础 10 维，与狗数量 N 无关）
+### 4.1 主观测（基础 10 维，与 N 无关）
 
 `SheepScenario._observation_snapshot` / `get_observation`：
 
 | 索引 | 含义 |
 |------|------|
-| `[0]` | 羊质心到目标距离 / `r_max`（`r_max = world_radius`） |
-| `[1]` | 质心相对目标的方位角 / π，∈ [-1, 1] |
-| `[2]` | 羊群平均速度模 / `max_speed`，∈ [-1, 1] |
-| `[3]` | 平均速度方向角 / π（**世界坐标系**，非相对目标方向），∈ [-1, 1] |
-| `[4]–[7]` | 各羊相对目标的轴对齐四向极值 `e0…e3`（与 `_compute_reward` 包络一致），各除以 `r_max` |
-| `[8]` | **N 只狗位置质心**相对**羊质心**的极径 / `r_max` |
-| `[9]` | 上述相对位移在世界系下的方位角 / π，∈ [-1, 1] |
+| `[0]` | 羊质心到目标距离 / `r_max` |
+| `[1]` | 质心相对目标方位角 / π |
+| `[2]` | 羊群平均速度模 / `max_speed` |
+| `[3]` | 平均速度方向角 / π（世界系） |
+| `[4]–[7]` | 相对目标的轴对齐四向极值 `e0…e3` / `r_max` |
+| `[8]` | 狗群质心相对羊质心极径 / `r_max` |
+| `[9]` | 上述相对位移方位角 / π |
 
-`gym.Box`：`obs_low[2:4]` 与 `obs_low[9]` 为 -1，对应上界 1；其余默认 ±10。
+### 4.2 编队增量（+3 维，`--formation_delta`）
 
-### 4.2 编队增量模式下的增广（+3 维）
-
-当 `formation_delta_mode=True`（训练侧 `--formation_delta`）：
-
-- `obs_dim = 13`：在基础 10 维后拼接 `_formation_obs_tail()`：  
-  - `θ_in / π`（∈ [-1,1]）  
-  - `R` 在 `[R_min, R_max]` 上线性归一化到 [-1, 1]  
-  - `2 * coverage - 1`（coverage ∈ [0,1]）
-
-重置时 `_reset_formation_integrator`：`θ_in=0`，`R=(R_min+R_max)/2`，`coverage=0.5`。
+`obs_dim = 13`：拼接 `θ_in/π`、归一化 `R`、`2*coverage-1`。重置积分器：`θ_in=0`，`R` 中值，`coverage=0.5`。增量上限见 `FORMATION_DELTA_*`（`defaults.py`）。
 
 ### 4.3 动作空间
 
-- **5 维** `Box([-1,1]^5)`。  
-- **训练**：`train_ppo.py` 将同一条动作广播为 `(num_herders, 5)`；环境只用 **`actions[0]`**。  
-- **解码有效维**：`a[0]…a[2]`；`a[3]、a[4]` 在 `HighLevelAction.decode_action` 内**置 0**，与策略输出无关。
+- **5 维** `Box([-1,1]^5)`；环境仅用 `actions[0]`；训练广播为 `(num_herders, 5)`。
 
-### 4.4 高层动作解码（绝对模式，`formation_delta_mode=False`）
+### 4.4 绝对模式解码
 
-实现：`envs/high_level_action.py`。站位半径全局常量 **`STANCE_RADIUS_MIN=5`、`STANCE_RADIUS_MAX=20`**（`HighLevelAction` 默认 `R_min/R_max`）。
+`envs/high_level_action.py`；`R ∈ [5, 20]` m。
 
-1. **`a[0]`**：`θ_in = wrap(a[0]·π)`，语义为 **弧中点 → 羊质心** 的方位角；弧在圆上的角向中心 **`θ_mid = θ_in − π`**（**羊质心 → 弧中点**）。  
-2. **`a[1]`**：`R = R_min + (a[1]+1)/2 · (R_max - R_min)`。  
-3. **`a[2]`**：`coverage = clip((a[2]+1)/2, 0, 1)`，再经 `_theta_span_from_coverage` 得弧张角 Θ（与 N 相关：`Θ_max = 2π(N-1)/N` 等）。
+1. `θ_in = wrap(a[0]·π)`，`θ_mid = θ_in − π`
+2. `R` 由 `a[1]` 线性映射
+3. `coverage` 由 `a[2]` 映射 → 弧张角 Θ（与 N 相关）
 
-几何：**圆心 = 当前羊质心**，半径 `R`，在 `[θ_mid − Θ/2, θ_mid + Θ/2]` 上均匀取 N 个目标点（`sample_herder_positions`）。
+圆心 = 羊质心；`sample_herder_positions` 均匀取 N 点；再最小间距与边界处理（见 §3.1）。
 
-随后 `SheepFlockEnv._sample_herder_positions`：狗-狗最小间距 2.0、裁剪到 `|p| ≤ world_radius - 3.0`。
+### 4.5 增量模式
 
-### 4.5 编队增量模式（`formation_delta_mode=True`）
-
-每档**高层刷新**时（见 §4.6）：
-
-- `Δθ_in = a[0] * formation_delta_theta_max_rad`（默认最大角由 `train_ppo.py --formation_delta_theta_max_deg` 换算，默认 22.5°）  
-- `ΔR = a[1] * formation_delta_radius_max`（默认 3.0 m）  
-- `Δcoverage = a[2] * formation_delta_coverage_max`（默认 0.15）  
-
-积分后 clip/wrap，再调用 `decoded_from_formation_params` + `sample_herder_positions`（与绝对模式同一几何）。
+每档高层刷新：`Δθ_in`、`ΔR`、`Δcoverage`（默认最大 22.5° / 3 m / 0.15），积分后同 §4.4 几何。
 
 ### 4.6 高层决策频率
 
-- 条件：`(step_count - 1) % high_level_interval == 0` 时解码并 `set_herder_targets`（**`N=1` 时每步刷新**；旧式 `% N == 1` 在 N=1 时恒假，已修正）。  
-- `high_level_interval`：`None` 时 **增量模式默认 1**，**绝对模式默认 5**；可用 `train_ppo.py --high_level_interval` 覆盖。
+`(step_count - 1) % high_level_interval == 0` 时 `set_herder_targets`（**N=1 每步**）。
 
-### 4.7 共享观测 `get_shared_obs` / `share_observation_space`
+| 模式 | 默认 interval |
+|------|----------------|
+| 增量 | 1 |
+| 绝对 | 5 |
 
-- `SheepScenario.get_shared_observation()`：在 **10 维** 主观测后，拼接每只狗相对羊质心的 `(ρ/r_shared, θ/π)` → 长度 **`10 + 2N`**。  
-- `SheepFlockEnv.get_shared_obs()`：若开启增量模式，再在末尾拼接 **3 维** 编队状态 → **`10 + 2N + 3`**。  
-- `share_observation_space.shape = (obs_dim + 2N,)`，与上一致。  
+`evaluate_generalization.py` 默认 **3**（与常见训练对齐）。
 
-默认 PPO 仅用主观测维 **`obs_dim`**（10 或 13），**不随 N 变化**；若未来 Critic 使用 `share_obs` 且 N 变化，需保证网络输入维与训练一致。
+### 4.7 共享观测
+
+长度 **10 + 2N**（+ 增量再 +3）。默认 PPO Actor 输入 **10 或 13**，不随 N 变。
 
 ---
 
@@ -147,32 +154,33 @@ sheep-herding-rl/
 
 ### 5.1 羊
 
-默认 `sheep_config`：`max_speed`、`max_force`、`perception_radius`、`separation_radius`、`velocity_drag`、`evasion_radius` 等。  
-
-力：分离 / 对齐 / 凝聚（`boids_weights`）、对机械狗的逃避、圆边界斥力。支持向量化更新（`vectorized_sheep_updates`）。
+Boids 分离/对齐/凝聚 + 逃避机械狗 +（可选）圆边界力；可向量化 `vectorized_sheep_updates`。
 
 ### 5.2 机械狗
 
-- **`use_herder_kinematics=True`**：吸引力指向目标 + 近羊群质心排斥，`avoid_radius = flock_spread*2.5+3`，步长 `min(5.0*dt, dist)`，再裁剪到圆盘。  
-- **`False`（`--herder_teleport`）**：位置直接设为裁剪后的目标。  
+| 模式 | 行为 |
+|------|------|
+| 势场（默认） | 吸引目标 + 排斥，`avoid_radius = flock_spread*2.5+3`，步长 `min(5.0*dt, dist)` |
+| 瞬移 | `--herder_teleport` |
+| MAPPO | 每主步 `low_level_substeps ≈ round(dt/0.1)` 子仿真 |
 
-`HerderEntity` 未接入 `SheepScenario` 主路径。
+`HerderEntity` 未接入主路径。
 
 ---
 
 ## 6. 奖励函数
 
-`SheepFlockEnv._compute_reward`（系数见 `reward_config` 默认值）：
+`SheepFlockEnv._compute_reward`；默认系数 **`envs/defaults.py` → `DEFAULT_REWARD_CONFIG`**：
 
-1. **势函数**：`w_potential * (prev_d_hat² - d_hat²)`，`d_hat = d / (2*world_radius)`。  
-2. **近目标**：`w_near * exp(-d/d0)`。  
-3. **速度正则**：近处抑制 `|v_mean|`。  
-4. **包络**：轴对齐 AABB 面积与 `envelope_area_ref` 的 tanh 惩罚。  
-5. **时间惩罚**：离目标较远时 `-time_penalty`。  
+| 项 | 说明 |
+|----|------|
+| 势函数 | `w_potential * (prev_d_hat² - d_hat²)` |
+| 近目标 | `w_near * exp(-d/d0)` |
+| 速度正则 | 近目标抑制质心速度 |
+| 包络 | AABB 面积 tanh 惩罚（与 `e0…e3` 一致） |
+| 时间惩罚 | 远离目标时扣分 |
 
-输出 clip 到 `[reward_clip_low, reward_clip_high]`；`info['reward_components']` 供 TensorBoard 子集使用。
-
-**成功**：`is_success = is_flock_at_target(threshold=5.0)`（课程与评估用）。
+Clip 到 `[reward_clip_low, reward_clip_high]`。成功：`is_flock_at_target(threshold=5.0)`。
 
 ---
 
@@ -180,93 +188,120 @@ sheep-herding-rl/
 
 ### 7.1 `CurriculumSheepFlockEnv`
 
-- `DEFAULT_STAGES`（`curriculum_env.py`）：例如 Stage0 羊 3、狗 3、50×50、`episode_length=200`、成功率阈值 0.8、`min_episodes=50`；后续阶段提高羊数与场地等。  
-- `advance_stage` / `set_stage`：重建 `SheepScenario`，`action_decoder = HighLevelAction()`（R 仍为 5–20），`_setup_spaces()`，`_reset_formation_integrator()`。  
-- `episode_end(success)` 由 `train_ppo.py` 在 macro 回合结束时调用。
+阶段列表：**`envs/defaults.py` → `DEFAULT_CURRICULUM_STAGE_SPECS`**（8 阶段：羊 3→30，场地 70→140，`episode_length` 200–300，`target_success_rate=0.8`，`min_episodes=100`；末阶段含 `num_sheep_range: (5,30)`）。
+
+`curriculum_env.py` 中 `DEFAULT_STAGES = [CurriculumStage(**spec) for spec in DEFAULT_CURRICULUM_STAGE_SPECS]`。
+
+升阶：`episode_end(success)` 由 `train_ppo.py` 在 macro episode 结束时调用。
 
 ### 7.2 `RandomizedSheepFlockEnv`
 
-- 每次 `reset` 随机羊数、狗数、世界尺寸、羊速等；`HighLevelAction()` 同样默认 R∈[5,20]。  
-- **主观测长度固定为 10（或增量模式 13）**，与 N 无关；**`share_observation_space` 含 `2N`**，若 N 在 episode 间变化，仅在使用共享观测的模块中需注意维数。标准 Actor 输入维稳定。
+每 `reset` 随机羊数、狗数、世界尺寸、羊速（范围见 `defaults.py`）。主观测维仍 10/13；`share_obs` 含 `2N`。
 
 ---
 
-## 8. PPO 训练（`train_ppo.py`）
+## 8. 训练（`train_ppo.py` / `train_hierarchical.py`）
 
-### 8.1 环境与设备
+### 8.1 环境构造
 
-- 仿真 CPU；策略 `--device auto|cuda|cpu`。  
-- `make_train_env` 通过 `_extra_sheep_env_kwargs` 传入 `formation_delta_mode`、`formation_delta_*`、`high_level_interval`。  
-- 默认 CLI **`episode_length=150`**（非课程时）；课程环境以各阶段 `episode_length` 为准（默认 200）。  
-- `resolve_rollout_episode_length`：课程下取各阶段 `episode_length` 的**最大值**填满 buffer。
+`make_train_env` → `_extra_sheep_env_kwargs` 转发：
+
+- `formation_delta_mode`、`*_formation_delta_*`
+- `high_level_interval`
+- `enforce_disk_boundary`（`--no-disk-boundary` 为 False）
+- `herder_teleport`、`low_level_model_dir`、低层子步/设备等
+
+`train_hierarchical.py` 仅为 `from train_ppo import main` 的入口别名。
 
 ### 8.2 网络与优化
 
-- `PPOActorCritic` / `ImprovedActorCritic`；GAE、优势标准化与 clip、PPO clip、可选 KL、Huber value、`ppo_log_ratio_clip`、大梯度跳过 step、奖励 RunningMeanStd、LR warmup+cosine、熵衰减等（与上一版文档一致，细节见源码与 argparse）。
+`PPOActorCritic` / `ImprovedActorCritic`；GAE、clip PPO、Huber value、奖励 RunningMeanStd、LR warmup+cosine、熵衰减、`ppo_log_ratio_clip`、大梯度跳过等（见 argparse）。
 
 ### 8.3 输出路径
 
-`results/{env_name}/{scenario_name}/ppo/seed{seed}/{timestamp}/models/model_{steps}.pt`，日志与 `training_metrics.json`、`tb/`。
+`results/{env_name}/{scenario_name}/ppo/seed{seed}/{timestamp}/models/model_{steps}.pt`，以及 `training_log.txt`、`training_metrics.json`、`tb/`。
+
+### 8.4 低层 MAPPO 桥接
+
+- 模块：`envs/low_level_mappo_bridge.py`
+- InforMARL 置于 `sys.path` 首位，避免与根目录 `onpolicy` 冲突
+- 权重：`actor.pt` 或兼容 checkpoint
+- 关键 CLI：`--low-level-model-dir`、`--low-level-substeps`、`--low-level-max-edge-dist`（大场地默认 30）、`--low-level-num-obstacles`、`--low-level-max-speed`
 
 ---
 
-## 9. 评估、可视化与调试工具
+## 9. 评估与可视化
 
 ### 9.1 `evaluate_policy.py`
 
-- `OBS_LABELS` / `ACTION_LABELS` 仍为**旧版语义**，与当前 10 维观测及 `a[0:3]` 解码**不一致**；解读向量请以 §4 为准。
+单配置 rollout；`--formation_delta` 等与环境对齐。注意：`OBS_LABELS` / `ACTION_LABELS` 仍为**旧版文字标签**，解读向量以 §4 为准。
 
-### 9.2 `visualize.py` / `scripts/visualize.sh`
+### 9.2 `evaluate_generalization.py`
 
-- 加载 checkpoint 动画展示场景与编队解码（依赖环境提供的 `_last_formation_decoded` 等）。
+- 网格默认：羊 `(5,10,15,20,25)` × 狗 `(3,4,5,6)`
+- 指标：成功率、完成步数（成功/全体）、结束时 `flock_spread`
+- 启动时从 checkpoint **推断 obs 维 10/13**，自动开关 `formation_delta`
+- 默认：`no-disk-boundary`、`high_level_interval=3`、非 `herder_teleport`
+- 输出 JSON + `plot_generalization.py` 折线图（`figure_paths` 写入 JSON）
 
-### 9.3 `scripts/formation_sliders.py`
+### 9.3 `visualize.py` / `scripts/visualize.sh`
 
-- Matplotlib 滑条交互：羊质心系下与训练一致的 `HighLevelAction` 解码（`θ_in`、`θ_mid`、R、coverage）。
+- 从 checkpoint 推断 `hidden_size`、`layer_N`、`obs_dim`（10/13）
+- 后端：有 DISPLAY 时尝试交互后端，否则 Agg；`VIS_DEVICE=cpu` 避免 GUI 与 CUDA 争抢
+- 输出：`--save_gif`、`--save-sheep-trajectory-dir`、`--save-visual-every K`、`--save-visual-herder-trails`
+- 路径 `/figures/...` → 仓库内 `figures/...`
+- 低层：`--low-level-model-dir` 等同训练
 
-### 9.4 `FormationAnalyzer.describe_formation`
+### 9.4 调试工具
 
-- 人类可读编队描述（mode、Θ、角度等），供调试。
+- `scripts/formation_sliders.py`：羊质心系编队滑条
+- `FormationAnalyzer.describe_formation`：人类可读编队描述
 
 ---
 
-## 10. 测试与 CI
+## 10. 测试
 
-- `tests/test_env_cpu_parity.py`  
-- `.github/workflows/close_stale.yaml`  
+```bash
+python -m pytest tests/ -q
+```
+
+- `tests/test_env_cpu_parity.py`
+- `tests/test_herder_assignment.py`
 
 ---
 
-## 11. 配置项速查
+## 11. CLI 速查
 
 | 类别 | 参数 |
 |------|------|
 | 环境 | `--num_sheep`, `--num_herders`, `--world_size`, `--episode_length` |
-| 课程 / 随机化 | `--use_curriculum`, `--start_stage`, `--use_randomized` |
-| 机械狗 | `--herder_teleport`, `--end_episode_when_at_target` |
-| 编队 | `--formation_delta`, `--formation_delta_theta_max_deg`, `--formation_delta_radius_max`, `--formation_delta_coverage_max`, `--high_level_interval` |
-| PPO / 网络 / 日志 | 同前（`--lr`, `--ppo_epoch`, `--hidden_size`, `--use_tensorboard`, …） |
+| 边界 / 狗 | `--no-disk-boundary`, `--herder_teleport`, `--herder_physics_legacy` |
+| 课程 / 随机 | `--use_curriculum`, `--start_stage`, `--use_randomized` |
+| 编队 | `--formation_delta`, `--formation_delta_*`, `--high_level_interval` |
+| 低层 MAPPO | `--low-level-model-dir`, `--low-level-substeps`, `--low-level-device`, … |
+| PPO / 网络 | `--lr`, `--ppo_epoch`, `--hidden_size`, `--layer_N`, `--use_tensorboard`, … |
 
-`scripts/train_gpu.sh`：课程阶段长度以 `curriculum_env.DEFAULT_STAGES` 为准（默认每阶段 **200**）；脚本内注释若写 150 则过时，以代码为准。默认 `hidden_size=512`、`num_env_steps=1e7` 等以该 shell 为准。
+`scripts/train_gpu.sh`：以脚本内实参为准（示例：`hidden_size=512`、`num_env_steps=1e7`、`formation_delta`、`no-disk-boundary`、`use_curriculum`）。
 
 ---
 
 ## 12. 已知注意点
 
-1. 目标恒在圆心；`README_CN.md` 中随机目标、旧观测/动作维、锚点方案等可能过时。  
-2. **`a[3]、a[4]` 无效**；占位保留 5 维便于与旧 checkpoint 或界面兼容。  
-3. `HerderEntity` 未接入主循环。  
-4. 评估脚本观测标签过时（§9.1）。  
-5. `KappaScheduler` 为 legacy，与 coverage 预热相关命名混用，训练主路径可不使用。
+1. **`a[3]、a[4]` 无效**，保留 5 维便于旧 checkpoint / 界面兼容。
+2. `HerderEntity` 未接入主循环。
+3. `evaluate_policy.py` 打印标签与 §4 维语义不一致（§9.1）。
+4. `KappaScheduler` / `get_wedge_width` 为 legacy 命名，主训练路径用 coverage。
+5. 合成轨迹脚本（`scripts/generate_synthetic_*.py`）**非环境 rollout**，勿当作真实策略结果。
 
 ---
 
 ## 13. 参考文献（概念）
 
-- PPO：Schulman et al., 2017  
-- Boids：Reynolds, 1987  
-- GAE：Schulman et al., 2016  
+- PPO：Schulman et al., 2017
+- Boids：Reynolds, 1987
+- GAE：Schulman et al., 2016
+- InforMARL / Graph MAPPO：见 [InforMARL/README.md](../InforMARL/README.md)
 
 ---
 
-*修改环境、观测或解码后请同步更新本文。*
+*修改环境、观测、解码或默认超参后请同步更新本文、`README_CN.md` 与 `envs/defaults.py` 注释。*

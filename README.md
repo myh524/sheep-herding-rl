@@ -7,7 +7,7 @@
 | 文档 | 说明 |
 |------|------|
 | **[docs/TECHNICAL.md](docs/TECHNICAL.md)** | 与当前源码同步的技术说明（观测/动作、奖励、目录结构） |
-| **[README_CN.md](README_CN.md)** | 中文详细文档（算法分析、训练调参、FAQ 等） |
+| **[README_CN.md](README_CN.md)** | 中文详细文档（架构、观测/动作、训练调参、FAQ 等） |
 
 共享默认超参集中在 **[`envs/defaults.py`](envs/defaults.py)**（场地尺寸、episode 长度、课程阶段、`formation_delta` 上限等），各入口通过引用该文件保持一致。
 
