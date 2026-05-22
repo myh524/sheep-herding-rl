@@ -443,73 +443,86 @@ class Scenario(BaseScenario):
                 rew -= self.collision_rew
         return rew
 
-    def _obstacle_rel_positions(self, agent: Agent, world: World) -> arr:
-        """Ego 到各障碍节点的相对位置（2 维/障碍），与 graph 中 obstacle 行的 rel_pos 一致。"""
+    def _obstacle_rel_positions(self, ego: Agent, world: World) -> arr:
+        """Ego 到各障碍的相对位置（2 维/障碍）；与 obs / 图节点中的障碍块一致。"""
         if not world.obstacles:
             return np.zeros(0, dtype=np.float64)
-        agent_pos = agent.state.p_pos
+        ego_pos = ego.state.p_pos
         return np.concatenate(
-            [obstacle.state.p_pos - agent_pos for obstacle in world.obstacles],
+            [obstacle.state.p_pos - ego_pos for obstacle in world.obstacles],
             axis=0,
         )
 
-    def observation(self, agent: Agent, world: World) -> arr:
+    def _goal_rel_to_ego(self, ego: Agent, entity: Entity, world: World) -> arr:
+        """实体目标相对 ego 的位移（2 维），语义与 obs 中 goal_rel 一致。"""
+        ego_pos = ego.state.p_pos
+        if "agent" in entity.name:
+            goal_pos = world.get_entity("landmark", entity.id).state.p_pos
+        elif "landmark" in entity.name or "obstacle" in entity.name:
+            goal_pos = entity.state.p_pos
+        else:
+            raise ValueError(f"{entity.name} not supported")
+        return goal_pos - ego_pos
+
+    def _entity_obs_style_feat(
+        self, ego: Agent, entity: Entity, world: World
+    ) -> arr:
         """
-        Return:
-            [agent_vel, agent_pos, goal_rel, obstacle_rel * num_obstacles]
-            前 6 维与原版相同；每个障碍追加 2 维 (obstacle_pos - agent_pos)。
+        与局部向量 obs 相同的布局（不含 entity_type）：
+        [vel(2), pos(2), goal_rel(2), obstacle_rel(2*K)]。
+        vel/pos 取该实体世界系量；goal_rel 与障碍块相对 ego。
+        ego 自身一行与 observation() 完全一致。
         """
-        agents_goal = world.get_entity("landmark", agent.id)
-        goal_rel = agents_goal.state.p_pos - agent.state.p_pos
-        base = np.concatenate(
-            [agent.state.p_vel, agent.state.p_pos, goal_rel], axis=0
-        )
-        obs_rel = self._obstacle_rel_positions(agent, world)
+        vel = entity.state.p_vel
+        pos = entity.state.p_pos
+        goal_rel = self._goal_rel_to_ego(ego, entity, world)
+        parts = [vel, pos, goal_rel]
+        obs_rel = self._obstacle_rel_positions(ego, world)
         if obs_rel.size:
-            return np.concatenate([base, obs_rel], axis=0)
-        return base
+            parts.append(obs_rel)
+        return np.concatenate(parts, axis=0)
+
+    @staticmethod
+    def _entity_type(entity: Entity) -> float:
+        if "agent" in entity.name:
+            return float(entity_mapping["agent"])
+        if "landmark" in entity.name:
+            return float(entity_mapping["landmark"])
+        if "obstacle" in entity.name:
+            return float(entity_mapping["obstacle"])
+        raise ValueError(f"{entity.name} not supported")
+
+    def _graph_node_feat(
+        self, ego: Agent, entity: Entity, world: World
+    ) -> arr:
+        """图节点特征 = obs 同布局 + entity_type（GNN embedding 用末维）。"""
+        return np.hstack(
+            [self._entity_obs_style_feat(ego, entity, world), self._entity_type(entity)]
+        )
+
+    def observation(self, agent: Agent, world: World) -> arr:
+        """局部向量 obs，与图节点前几维布局一致（无 entity_type）。"""
+        return self._entity_obs_style_feat(agent, agent, world)
 
     def get_id(self, agent: Agent) -> arr:
         return np.array([agent.global_id])
 
     def graph_observation(self, agent: Agent, world: World) -> Tuple[arr, arr]:
         """
-        FIXME: Take care of the case where edge_list is empty
         Returns: [node features, adjacency matrix]
         • Node features (num_entities, num_node_feats):
-            If `global`:
-                • node features are global [pos, vel, goal, entity-type]
-                • edge features are relative distances (just magnitude)
-                NOTE: for `landmarks` and `obstacles` the `goal` is
-                        the same as its position
-            If `relative`:
-                • node features are relative [pos, vel, goal, entity-type] to ego agents
-                • edge features are relative distances (just magnitude)
-                NOTE: for `landmarks` and `obstacles` the `goal` is
-                        the same as its position
-        • Adjacency Matrix (num_entities, num_entities)
-            NOTE: using the distance matrix, need to do some post-processing
-            If `global`:
-                • All close-by entities are connectd together
-            If `relative`:
-                • Only entities close to the ego-agent are connected
-
+            每行与局部 obs 同布局 [vel, pos, goal_rel, obstacle_rel×K]，
+            末尾 + entity_type（供 GNN embedding；末维不是 obs 的一部分）。
+            global / relative 均使用上述 ego 系语义（连边仍由 max_edge_dist 决定）。
+        • Adjacency: 实体间距离矩阵 cached_dist_mag
         """
-        num_entities = len(world.entities)
-        # node observations
-        node_obs = []
-        if world.graph_feat_type == "global":
-            for i, entity in enumerate(world.entities):
-                node_obs_i = self._get_entity_feat_global(entity, world)
-                node_obs.append(node_obs_i)
-        elif world.graph_feat_type == "relative":
-            for i, entity in enumerate(world.entities):
-                node_obs_i = self._get_entity_feat_relative(agent, entity, world)
-                node_obs.append(node_obs_i)
-
-        node_obs = np.array(node_obs)
+        node_obs = np.array(
+            [
+                self._graph_node_feat(agent, entity, world)
+                for entity in world.entities
+            ]
+        )
         adj = world.cached_dist_mag
-
         return node_obs, adj
 
     def update_graph(self, world: World):
@@ -531,56 +544,6 @@ class Scenario(BaseScenario):
             world.edge_weight = dists[row, col]
         elif world.graph_feat_type == "relative":
             world.edge_weight = dists[row, col]
-
-    def _get_entity_feat_global(self, entity: Entity, world: World) -> arr:
-        """
-        Returns: ([velocity, position, goal_pos, entity_type])
-        in global coords for the given entity
-        """
-        pos = entity.state.p_pos
-        vel = entity.state.p_vel
-        if "agent" in entity.name:
-            goal_pos = world.get_entity("landmark", entity.id).state.p_pos
-            entity_type = entity_mapping["agent"]
-        elif "landmark" in entity.name:
-            goal_pos = pos
-            entity_type = entity_mapping["landmark"]
-        elif "obstacle" in entity.name:
-            goal_pos = pos
-            entity_type = entity_mapping["obstacle"]
-        else:
-            raise ValueError(f"{entity.name} not supported")
-
-        return np.hstack([vel, pos, goal_pos, entity_type])
-
-    def _get_entity_feat_relative(
-        self, agent: Agent, entity: Entity, world: World
-    ) -> arr:
-        """
-        Returns: ([velocity, position, goal_pos, entity_type])
-        in coords relative to the `agent` for the given entity
-        """
-        agent_pos = agent.state.p_pos
-        agent_vel = agent.state.p_vel
-        entity_pos = entity.state.p_pos
-        entity_vel = entity.state.p_vel
-        rel_pos = entity_pos - agent_pos
-        rel_vel = entity_vel - agent_vel
-        if "agent" in entity.name:
-            goal_pos = world.get_entity("landmark", entity.id).state.p_pos
-            rel_goal_pos = goal_pos - agent_pos
-            entity_type = entity_mapping["agent"]
-        elif "landmark" in entity.name:
-            rel_goal_pos = rel_pos
-            entity_type = entity_mapping["landmark"]
-        elif "obstacle" in entity.name:
-            rel_goal_pos = rel_pos
-            entity_type = entity_mapping["obstacle"]
-        else:
-            raise ValueError(f"{entity.name} not supported")
-
-        return np.hstack([rel_vel, rel_pos, rel_goal_pos, entity_type])
-
 
 # actions: [None, ←, →, ↓, ↑, comm1, comm2]
 if __name__ == "__main__":

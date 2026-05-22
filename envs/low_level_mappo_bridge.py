@@ -4,8 +4,9 @@
 InforMARL 经主仓库小幅 patch（``World.external_goals`` / ``Scenario.apply_external_state`` /
 ``GraphMPEEnv().scenario`` / config 新增两开关）后，与原 ``mappo_layered_shepherd`` 接口等价。
 
-低层局部观测（``navigation_graph.observation``）：6 维基础量 + 每个障碍 2 维相对位置；
-``num_obstacles=1`` 且牧羊模式时为 8 维。旧 ``actor.pt``（6 维 obs）需重新训练。
+低层局部观测与图节点（``navigation_graph``）布局一致：
+``[vel, pos, goal_rel, obstacle_rel×K]``（``num_obstacles=1`` 时为 8 维）；
+图节点末维另加 ``entity_type`` 供 GNN。旧 checkpoint 需重新训练。
 
 ``agent_id`` 仍由环境/buffer 提供，仅在策略层用于 GNN gather 下标，不作为 Actor MLP 输入。
 
