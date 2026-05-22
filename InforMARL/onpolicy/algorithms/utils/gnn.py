@@ -552,25 +552,37 @@ class GNNBase(nn.Module):
                     max_edge_dist=args.max_edge_dist)
         self.out_dim = args.gnn_hidden_size * (args.gnn_num_heads if args.gnn_concat_heads else 1)
         
-    def forward(self, node_obs:Tensor, adj:Tensor, agent_id:Tensor):
+    def forward(
+        self,
+        node_obs: Tensor,
+        adj: Tensor,
+        ego_node_index: Optional[Tensor] = None,
+    ):
+        """
+        ego_node_index: 可选，GNN 输出后 gather 本狗节点用的下标（非 MLP 特征）。
+        为 None 时假定 batch 第 i 行对应图中第 i 个 agent 节点（0..B-1）。
+        """
         batch_size, num_nodes, _ = node_obs.shape
         edge_index, edge_attr = TransformerConvNet.process_adj(adj, self.gnn.max_edge_dist)
-        # print("Outer edge_index", edge_index.shape, "node_obs", node_obs.shape, "edge_attr", edge_attr.shape)
-        # Flatten node_obs
         x = node_obs.view(-1, node_obs.size(-1))
-        # Create batch index
         batch = torch.arange(batch_size, device=node_obs.device).repeat_interleave(num_nodes)
-        # Create PyG Data object
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, batch=batch)
-    
-        # batch = Batch.from_data_list([Data(x=node_obs[i], edge_index=edge_index, edge_attr=edge_attr) 
-        # 						for i in range(node_obs.size(0))])
         x = self.gnn(data)
-        if self.gnn.graph_aggr == 'node':
-            # x = x.view(node_obs.size(0), -1, self.out_dim)
+        if self.gnn.graph_aggr == "node":
             x = x.view(batch_size, num_nodes, -1)
-            agent_id = agent_id.long()  # Ensure agent_id is long tensor
-            x = x.gather(1, agent_id.unsqueeze(-1).expand(-1, -1, x.size(-1))).squeeze(1)
+            if ego_node_index is None:
+                gather_idx = torch.arange(
+                    batch_size, device=node_obs.device, dtype=torch.long
+                )
+            else:
+                gather_idx = ego_node_index.long().reshape(-1)
+                if gather_idx.numel() != batch_size:
+                    gather_idx = torch.arange(
+                        batch_size, device=node_obs.device, dtype=torch.long
+                    )
+            x = x.gather(
+                1, gather_idx.unsqueeze(-1).expand(-1, -1, x.size(-1))
+            ).squeeze(1)
         return x
     
     # @property

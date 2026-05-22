@@ -443,16 +443,31 @@ class Scenario(BaseScenario):
                 rew -= self.collision_rew
         return rew
 
+    def _obstacle_rel_positions(self, agent: Agent, world: World) -> arr:
+        """Ego 到各障碍节点的相对位置（2 维/障碍），与 graph 中 obstacle 行的 rel_pos 一致。"""
+        if not world.obstacles:
+            return np.zeros(0, dtype=np.float64)
+        agent_pos = agent.state.p_pos
+        return np.concatenate(
+            [obstacle.state.p_pos - agent_pos for obstacle in world.obstacles],
+            axis=0,
+        )
+
     def observation(self, agent: Agent, world: World) -> arr:
         """
         Return:
-            [agent_vel, agent_pos, goal_pos]
+            [agent_vel, agent_pos, goal_rel, obstacle_rel * num_obstacles]
+            前 6 维与原版相同；每个障碍追加 2 维 (obstacle_pos - agent_pos)。
         """
-        # get positions of all entities in this agent's reference frame
-        goal_pos = []
         agents_goal = world.get_entity("landmark", agent.id)
-        goal_pos.append(agents_goal.state.p_pos - agent.state.p_pos)
-        return np.concatenate([agent.state.p_vel, agent.state.p_pos] + goal_pos)
+        goal_rel = agents_goal.state.p_pos - agent.state.p_pos
+        base = np.concatenate(
+            [agent.state.p_vel, agent.state.p_pos, goal_rel], axis=0
+        )
+        obs_rel = self._obstacle_rel_positions(agent, world)
+        if obs_rel.size:
+            return np.concatenate([base, obs_rel], axis=0)
+        return base
 
     def get_id(self, agent: Agent) -> arr:
         return np.array([agent.global_id])

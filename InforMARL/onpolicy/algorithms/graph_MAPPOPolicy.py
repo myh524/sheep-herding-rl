@@ -1,10 +1,15 @@
 import gym
 import argparse
 
+import numpy as np
 import torch
 from torch import Tensor
 from typing import Tuple
-from onpolicy.algorithms.graph_actor_critic import GR_Actor, GR_Critic
+from onpolicy.algorithms.graph_actor_critic import (
+    GR_Actor,
+    GR_Critic,
+    resolve_ego_gather_index,
+)
 from onpolicy.utils.util import update_linear_schedule
 
 
@@ -160,19 +165,29 @@ class GR_MAPPOPolicy:
         :return rnn_states_critic: (torch.Tensor)
             updated critic network RNN states.
         """
+        batch_size = np.shape(obs)[0]
+        ego_gather = resolve_ego_gather_index(agent_id, batch_size, self.device)
         actions, action_log_probs, rnn_states_actor = self.actor.forward(
             obs,
             node_obs,
             adj,
-            agent_id,
             rnn_states_actor,
             masks,
             available_actions,
             deterministic,
+            ego_node_index=ego_gather,
         )
 
+        ego_critic = resolve_ego_gather_index(
+            share_agent_id, batch_size, self.device
+        )
         values, rnn_states_critic = self.critic.forward(
-            cent_obs, node_obs, adj, share_agent_id, rnn_states_critic, masks
+            cent_obs,
+            node_obs,
+            adj,
+            rnn_states_critic,
+            masks,
+            ego_node_index=ego_critic,
         )
         return (values, actions, action_log_probs, rnn_states_actor, rnn_states_critic)
 
@@ -196,8 +211,17 @@ class GR_MAPPOPolicy:
 
         :return values: (torch.Tensor) value function predictions.
         """
+        batch_size = np.shape(cent_obs)[0]
+        ego_critic = resolve_ego_gather_index(
+            share_agent_id, batch_size, self.device
+        )
         values, _ = self.critic.forward(
-            cent_obs, node_obs, adj, share_agent_id, rnn_states_critic, masks
+            cent_obs,
+            node_obs,
+            adj,
+            rnn_states_critic,
+            masks,
+            ego_node_index=ego_critic,
         )
         return values
 
@@ -252,20 +276,30 @@ class GR_MAPPOPolicy:
         :return dist_entropy: (torch.Tensor)
             action distribution entropy for the given inputs.
         """
+        batch_size = np.shape(obs)[0]
+        ego_gather = resolve_ego_gather_index(agent_id, batch_size, self.device)
         action_log_probs, dist_entropy = self.actor.evaluate_actions(
             obs,
             node_obs,
             adj,
-            agent_id,
             rnn_states_actor,
             action,
             masks,
             available_actions,
             active_masks,
+            ego_node_index=ego_gather,
         )
 
+        ego_critic = resolve_ego_gather_index(
+            share_agent_id, batch_size, self.device
+        )
         values, _ = self.critic.forward(
-            cent_obs, node_obs, adj, share_agent_id, rnn_states_critic, masks
+            cent_obs,
+            node_obs,
+            adj,
+            rnn_states_critic,
+            masks,
+            ego_node_index=ego_critic,
         )
         return values, action_log_probs, dist_entropy
 
@@ -301,14 +335,16 @@ class GR_MAPPOPolicy:
             whether the action should be mode of
             distribution or should be sampled.
         """
+        batch_size = np.shape(obs)[0]
+        ego_gather = resolve_ego_gather_index(agent_id, batch_size, self.device)
         actions, _, rnn_states_actor = self.actor.forward(
             obs,
             node_obs,
             adj,
-            agent_id,
             rnn_states_actor,
             masks,
             available_actions,
             deterministic,
+            ego_node_index=ego_gather,
         )
         return actions, rnn_states_actor

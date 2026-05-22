@@ -1,7 +1,8 @@
 import argparse
-from typing import Tuple, List
+from typing import Tuple, List, Optional, Union
 
 import gym
+import numpy as np
 import torch
 from torch import Tensor
 import torch.nn as nn
@@ -14,20 +15,38 @@ from onpolicy.algorithms.utils.popart import PopArt
 from onpolicy.utils.util import get_shape_from_obs_space
 
 
+def resolve_ego_gather_index(
+    agent_id: Optional[Union[np.ndarray, Tensor]],
+    batch_size: int,
+    device: torch.device,
+) -> Optional[Tensor]:
+    """
+    由 buffer/env 中的 agent_id 得到 GNN gather 下标；非策略 MLP 的输入特征。
+    为 None 时 GNN 使用 0..B-1（batch 行与 agent 下标对齐）。
+    """
+    if agent_id is None:
+        return None
+    idx = check(agent_id).to(device=device).long().reshape(-1)
+    if idx.numel() != batch_size:
+        return None
+    return idx
+
+
 def minibatchGenerator(
-    obs: Tensor, node_obs: Tensor, adj: Tensor, agent_id: Tensor, max_batch_size: int
+    obs: Tensor,
+    node_obs: Tensor,
+    adj: Tensor,
+    max_batch_size: int,
+    ego_node_index: Optional[Tensor] = None,
 ):
-    """
-    Split a big batch into smaller batches.
-    """
+    """Split a big batch into smaller batches."""
     num_minibatches = obs.shape[0] // max_batch_size + 1
     for i in range(num_minibatches):
-        yield (
-            obs[i * max_batch_size : (i + 1) * max_batch_size],
-            node_obs[i * max_batch_size : (i + 1) * max_batch_size],
-            adj[i * max_batch_size : (i + 1) * max_batch_size],
-            agent_id[i * max_batch_size : (i + 1) * max_batch_size],
-        )
+        sl = slice(i * max_batch_size, (i + 1) * max_batch_size)
+        ego_batch = None
+        if ego_node_index is not None:
+            ego_batch = ego_node_index[sl]
+        yield obs[sl], node_obs[sl], adj[sl], ego_batch
 
 
 class GR_Actor(nn.Module):
@@ -107,67 +126,40 @@ class GR_Actor(nn.Module):
         obs,
         node_obs,
         adj,
-        agent_id,
         rnn_states,
         masks,
         available_actions=None,
         deterministic=False,
+        ego_node_index: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Compute actions from the given inputs.
-        obs: (np.ndarray / torch.Tensor)
-            Observation inputs into network.
-        node_obs (np.ndarray / torch.Tensor):
-            Local agent graph node features to the actor.
-        adj (np.ndarray / torch.Tensor):
-            Adjacency matrix for the graph
-        agent_id (np.ndarray / torch.Tensor)
-            The agent id to which the observation belongs to
-        rnn_states: (np.ndarray / torch.Tensor)
-            If RNN network, hidden states for RNN.
-        masks: (np.ndarray / torch.Tensor)
-            Mask tensor denoting if hidden states
-            should be reinitialized to zeros.
-        available_actions: (np.ndarray / torch.Tensor)
-            Denotes which actions are available to agent
-            (if None, all actions available)
-        deterministic: (bool)
-            Whether to sample from action distribution or return the mode.
-
-        :return actions: (torch.Tensor)
-            Actions to take.
-        :return action_log_probs: (torch.Tensor)
-            Log probabilities of taken actions.
-        :return rnn_states: (torch.Tensor)
-            Updated RNN hidden states.
+        Network inputs: obs, node_obs, adj（及 RNN 状态）.
+        ego_node_index: 仅用于 GNN 后 gather 本狗节点，不是 MLP 特征。
         """
         obs = check(obs).to(**self.tpdv)
         node_obs = check(node_obs).to(**self.tpdv)
         adj = check(adj).to(**self.tpdv)
-        agent_id = check(agent_id).to(**self.tpdv).long()
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
 
-        # if batch size is big, split into smaller batches, forward pass and then concatenate
         if (self.split_batch) and (obs.shape[0] > self.max_batch_size):
-            # print(f'Actor obs: {obs.shape[0]}')
             batchGenerator = minibatchGenerator(
-                obs, node_obs, adj, agent_id, self.max_batch_size
+                obs, node_obs, adj, self.max_batch_size, ego_node_index
             )
             actor_features = []
-            for batch in batchGenerator:
-                obs_batch, node_obs_batch, adj_batch, agent_id_batch = batch
+            for obs_batch, node_obs_batch, adj_batch, ego_batch in batchGenerator:
                 nbd_feats_batch = self.gnn_base(
-                    node_obs_batch, adj_batch, agent_id_batch
+                    node_obs_batch, adj_batch, ego_batch
                 )
                 act_feats_batch = torch.cat([obs_batch, nbd_feats_batch], dim=1)
                 actor_feats_batch = self.base(act_feats_batch)
                 actor_features.append(actor_feats_batch)
             actor_features = torch.cat(actor_features, dim=0)
         else:
-            nbd_features = self.gnn_base(node_obs, adj, agent_id)
+            nbd_features = self.gnn_base(node_obs, adj, ego_node_index)
             actor_features = torch.cat([obs, nbd_features], dim=1)
             actor_features = self.base(actor_features)
 
@@ -185,45 +177,17 @@ class GR_Actor(nn.Module):
         obs,
         node_obs,
         adj,
-        agent_id,
         rnn_states,
         action,
         masks,
         available_actions=None,
         active_masks=None,
+        ego_node_index: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
-        """
-        Compute log probability and entropy of given actions.
-        obs: (torch.Tensor)
-            Observation inputs into network.
-        node_obs (torch.Tensor):
-            Local agent graph node features to the actor.
-        adj (torch.Tensor):
-            Adjacency matrix for the graph.
-        agent_id (np.ndarray / torch.Tensor)
-            The agent id to which the observation belongs to
-        action: (torch.Tensor)
-            Actions whose entropy and log probability to evaluate.
-        rnn_states: (torch.Tensor)
-            If RNN network, hidden states for RNN.
-        masks: (torch.Tensor)
-            Mask tensor denoting if hidden states
-            should be reinitialized to zeros.
-        available_actions: (torch.Tensor)
-            Denotes which actions are available to agent
-            (if None, all actions available)
-        active_masks: (torch.Tensor)
-            Denotes whether an agent is active or dead.
-
-        :return action_log_probs: (torch.Tensor)
-            Log probabilities of the input actions.
-        :return dist_entropy: (torch.Tensor)
-            Action distribution entropy for the given inputs.
-        """
+        """Compute log probability and entropy of given actions."""
         obs = check(obs).to(**self.tpdv)
         node_obs = check(node_obs).to(**self.tpdv)
         adj = check(adj).to(**self.tpdv)
-        agent_id = check(agent_id).to(**self.tpdv)
         rnn_states = check(rnn_states).to(**self.tpdv)
         action = check(action).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
@@ -233,24 +197,21 @@ class GR_Actor(nn.Module):
         if active_masks is not None:
             active_masks = check(active_masks).to(**self.tpdv)
 
-        # if batch size is big, split into smaller batches, forward pass and then concatenate
         if (self.split_batch) and (obs.shape[0] > self.max_batch_size):
-            # print(f'eval Actor obs: {obs.shape[0]}')
             batchGenerator = minibatchGenerator(
-                obs, node_obs, adj, agent_id, self.max_batch_size
+                obs, node_obs, adj, self.max_batch_size, ego_node_index
             )
             actor_features = []
-            for batch in batchGenerator:
-                obs_batch, node_obs_batch, adj_batch, agent_id_batch = batch
+            for obs_batch, node_obs_batch, adj_batch, ego_batch in batchGenerator:
                 nbd_feats_batch = self.gnn_base(
-                    node_obs_batch, adj_batch, agent_id_batch
+                    node_obs_batch, adj_batch, ego_batch
                 )
                 act_feats_batch = torch.cat([obs_batch, nbd_feats_batch], dim=1)
                 actor_feats_batch = self.base(act_feats_batch)
                 actor_features.append(actor_feats_batch)
             actor_features = torch.cat(actor_features, dim=0)
         else:
-            nbd_features = self.gnn_base(node_obs, adj, agent_id)
+            nbd_features = self.gnn_base(node_obs, adj, ego_node_index)
             actor_features = torch.cat([obs, nbd_features], dim=1)
             actor_features = self.base(actor_features)
 
@@ -351,54 +312,36 @@ class GR_Critic(nn.Module):
         self.to(device)
 
     def forward(
-        self, cent_obs, node_obs, adj, agent_id, rnn_states, masks
+        self,
+        cent_obs,
+        node_obs,
+        adj,
+        rnn_states,
+        masks,
+        ego_node_index: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
-        """
-        Compute actions from the given inputs.
-        cent_obs: (np.ndarray / torch.Tensor)
-            Observation inputs into network.
-        node_obs (np.ndarray):
-            Local agent graph node features to the actor.
-        adj (np.ndarray):
-            Adjacency matrix for the graph.
-        agent_id (np.ndarray / torch.Tensor)
-            The agent id to which the observation belongs to
-        rnn_states: (np.ndarray / torch.Tensor)
-            If RNN network, hidden states for RNN.
-        masks: (np.ndarray / torch.Tensor)
-            Mask tensor denoting if RNN states
-            should be reinitialized to zeros.
-
-        :return values: (torch.Tensor) value function predictions.
-        :return rnn_states: (torch.Tensor) updated RNN hidden states.
-        """
+        """Value forward; ego_node_index 仅用于 GNN gather，非 MLP 输入。"""
         cent_obs = check(cent_obs).to(**self.tpdv)
         node_obs = check(node_obs).to(**self.tpdv)
         adj = check(adj).to(**self.tpdv)
-        agent_id = check(agent_id).to(**self.tpdv).long()
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
 
-        # if batch size is big, split into smaller batches, forward pass and then concatenate
         if (self.split_batch) and (cent_obs.shape[0] > self.max_batch_size):
-            # print(f'Cent obs: {cent_obs.shape[0]}')
             batchGenerator = minibatchGenerator(
-                cent_obs, node_obs, adj, agent_id, self.max_batch_size
+                cent_obs, node_obs, adj, self.max_batch_size, ego_node_index
             )
             critic_features = []
-            for batch in batchGenerator:
-                obs_batch, node_obs_batch, adj_batch, agent_id_batch = batch
+            for obs_batch, node_obs_batch, adj_batch, ego_batch in batchGenerator:
                 nbd_feats_batch = self.gnn_base(
-                    node_obs_batch, adj_batch, agent_id_batch
+                    node_obs_batch, adj_batch, ego_batch
                 )
                 act_feats_batch = torch.cat([obs_batch, nbd_feats_batch], dim=1)
                 critic_feats_batch = self.base(act_feats_batch)
                 critic_features.append(critic_feats_batch)
             critic_features = torch.cat(critic_features, dim=0)
         else:
-            nbd_features = self.gnn_base(
-                node_obs, adj, agent_id
-            )  # CHECK from where are these agent_ids coming
+            nbd_features = self.gnn_base(node_obs, adj, ego_node_index)
             if self.args.use_cent_obs:
                 critic_features = torch.cat(
                     [cent_obs, nbd_features], dim=1
